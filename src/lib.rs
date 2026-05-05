@@ -185,7 +185,7 @@ mod tests {
     fn solid_color_uses_runs() {
         // 200 pixels of solid (200,50,25,255). After the first chunk
         // we expect ceil(199/62) = 4 RUN chunks to cover the rest.
-        let pixels = vec![200u8, 50, 25, 255].repeat(200);
+        let pixels = [200u8, 50, 25, 255].repeat(200);
         let bytes = encode_qoi(200, 1, 4, &pixels);
         // Header (14) + at most 5 (first chunk) + 4 RUN bytes (1 each)
         // + end marker (8) = 31 bytes upper bound.
@@ -271,7 +271,7 @@ mod tests {
         // LUMA from prev (0,0,0,255): dg=6, dr-dg=-1, db-dg=1 — fits.
         // Remaining 99 pixels = ceil(99/62) = 2 RUN chunks (one of 62,
         // one of 37).
-        let pixels = vec![5u8, 6, 7, 255].repeat(100);
+        let pixels = [5u8, 6, 7, 255].repeat(100);
         let bytes = encode_qoi(100, 1, 4, &pixels);
         // = 14 + 2 + 2 + 8 = 26.
         assert_eq!(bytes.len(), 26);
@@ -365,7 +365,7 @@ mod tests {
         // First pixel equals initial prev (0,0,0,255). The very first
         // chunk is a RUN — exercises the "run flushes at image end"
         // fallback.
-        let pixels = vec![0u8, 0, 0, 255].repeat(5);
+        let pixels = [0u8, 0, 0, 255].repeat(5);
         let bytes = encode_qoi(5, 1, 4, &pixels);
         // Header + 1 RUN of 5 + marker = 23.
         assert_eq!(bytes.len(), 23);
