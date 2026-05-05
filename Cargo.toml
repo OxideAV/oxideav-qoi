@@ -1,0 +1,32 @@
+[package]
+name = "oxideav-qoi"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-qoi"
+homepage = "https://github.com/OxideAV/oxideav-qoi"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust QOI (Quite OK Image) reader and writer for the oxideav framework — clean-room implementation of the qoiformat.org one-page specification"
+readme = "README.md"
+keywords = ["multimedia", "image", "qoi", "codec", "pure-rust"]
+categories = ["multimedia::encoding", "multimedia::images"]
+
+[dependencies]
+# `oxideav-core` is gated behind the default-on `registry` feature so
+# image-library consumers can depend on `oxideav-qoi` with
+# `default-features = false` and avoid the framework dependency tree
+# entirely. Without `registry` the crate exposes the standalone
+# `parse_qoi` / `encode_qoi` API plus crate-local `QoiImage` /
+# `QoiError` / `QoiChannels` / `QoiColorspace` types and never
+# references `oxideav-core`.
+oxideav-core = { version = "0.1", optional = true }
+
+[features]
+default = ["registry"]
+
+# Wires up the codec / encoder / decoder trait implementations against
+# `oxideav-core` so the crate can plug into the `oxideav` framework
+# registry. Default-on; turn off for image-library use-cases that just
+# want the standalone `parse_qoi` API.
+registry = ["dep:oxideav-core"]
