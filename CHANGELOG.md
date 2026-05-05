@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OxideAV/oxideav-qoi/compare/v0.0.1...v0.0.2) - 2026-05-05
+
+### Other
+
+- clippy 1.95 — useless_vec → array literal in three RUN-chunk fixtures
+
 ### Added
 
 - Initial release: pure-Rust QOI (Quite OK Image) reader and writer,
