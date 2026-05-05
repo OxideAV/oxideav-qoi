@@ -5,9 +5,11 @@
 //! and skip the `oxideav-core` dependency entirely.
 //!
 //! The module exposes:
-//! * [`register`] / [`register_codecs`] — the `CodecRegistry` entry
-//!   points the umbrella `oxideav` crate calls during framework
-//!   initialisation.
+//! * [`register`] — the unified `RuntimeContext` entry point the
+//!   umbrella `oxideav` crate calls during framework initialisation.
+//!   Internally calls [`register_codecs`] and [`register_containers`].
+//! * [`register_codecs`] — registers the QOI codec (decoder + encoder)
+//!   into a [`CodecRegistry`].
 //! * [`register_containers`] — registers the `.qoi` file extension
 //!   against the container name `"qoi"` so cli-convert / pipeline
 //!   probing can resolve a `.qoi` output path through the central
@@ -19,7 +21,7 @@
 //!   `decoder.rs` / `encoder.rs`) bubble bitstream errors up through
 //!   the framework error type.
 
-use oxideav_core::{CodecCapabilities, CodecId, PixelFormat};
+use oxideav_core::{CodecCapabilities, CodecId, PixelFormat, RuntimeContext};
 use oxideav_core::{CodecInfo, CodecRegistry, ContainerRegistry};
 
 use crate::error::QoiError;
@@ -63,27 +65,42 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
 /// QOI is a single-image format with no nested container layer — the
 /// file *is* the codec packet — so we register only the extension
 /// hint here, no demuxer / muxer / probe. Callers that just want the
-/// codec side should keep using [`register_codecs`] / [`register`].
+/// codec side should keep using [`register_codecs`].
 pub fn register_containers(reg: &mut ContainerRegistry) {
     reg.register_extension("qoi", "qoi");
 }
 
-/// Combined registration entry point. QOI has no nested container
-/// surface; the file *is* the codec packet, so this is just a thin
-/// alias for [`register_codecs`]. Use [`register_containers`]
-/// separately to wire the `.qoi` extension into the
-/// [`ContainerRegistry`].
-pub fn register(codecs: &mut CodecRegistry) {
-    register_codecs(codecs);
+/// Unified entry point: install every codec and container provided by
+/// `oxideav-qoi` into a [`RuntimeContext`].
+pub fn register(ctx: &mut RuntimeContext) {
+    register_codecs(&mut ctx.codecs);
+    register_containers(&mut ctx.containers);
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn qoi_extension_resolves_to_qoi_container() {
-        let mut reg = oxideav_core::ContainerRegistry::new();
-        super::register_containers(&mut reg);
+        let mut reg = ContainerRegistry::new();
+        register_containers(&mut reg);
         assert_eq!(reg.container_for_extension("qoi"), Some("qoi"));
         assert_eq!(reg.container_for_extension("QOI"), Some("qoi")); // case insensitive
+    }
+
+    #[test]
+    fn register_via_runtime_context_installs_factories() {
+        let mut ctx = RuntimeContext::new();
+        register(&mut ctx);
+        assert!(
+            ctx.codecs.decoder_ids().next().is_some(),
+            "register(ctx) should install codec decoder factories"
+        );
+        assert_eq!(
+            ctx.containers.container_for_extension("qoi"),
+            Some("qoi"),
+            "register(ctx) should install .qoi extension hint"
+        );
     }
 }
