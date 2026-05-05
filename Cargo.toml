@@ -21,6 +21,12 @@ categories = ["multimedia::encoding", "multimedia::images"]
 # `QoiError` / `QoiChannels` / `QoiColorspace` types and never
 # references `oxideav-core`.
 oxideav-core = { version = "0.1", optional = true }
+# Distributed-slice auto-registration into `oxideav_core::REGISTRARS`
+# via the `oxideav_core::register!` macro. Tiny crate, no transitive
+# deps; works on every target including wasm. Gated behind the
+# default-on `registry` feature alongside `oxideav-core` so the
+# standalone build path stays decoupled.
+linkme = { version = "0.3", optional = true }
 
 [features]
 default = ["registry"]
@@ -29,4 +35,4 @@ default = ["registry"]
 # `oxideav-core` so the crate can plug into the `oxideav` framework
 # registry. Default-on; turn off for image-library use-cases that just
 # want the standalone `parse_qoi` API.
-registry = ["dep:oxideav-core"]
+registry = ["dep:oxideav-core", "dep:linkme"]
