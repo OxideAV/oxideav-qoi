@@ -28,3 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Default-on `registry` cargo feature wires up `Decoder` / `Encoder`
   trait impls against `oxideav-core`. Image-library consumers can
   build with `--no-default-features` for an `oxideav-core`-free build.
+- `registry::register_containers(&mut ContainerRegistry)` registers
+  the `.qoi` file extension against the container name `"qoi"` so
+  cli-convert / pipeline output probing can resolve `.qoi` paths
+  through the central registry instead of a hard-coded list.

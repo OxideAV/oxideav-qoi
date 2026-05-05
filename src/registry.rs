@@ -7,15 +7,20 @@
 //! The module exposes:
 //! * [`register`] / [`register_codecs`] — the `CodecRegistry` entry
 //!   points the umbrella `oxideav` crate calls during framework
-//!   initialisation. (QOI is a single-image format with no nested
-//!   container layer, so there is no `register_containers`.)
+//!   initialisation.
+//! * [`register_containers`] — registers the `.qoi` file extension
+//!   against the container name `"qoi"` so cli-convert / pipeline
+//!   probing can resolve a `.qoi` output path through the central
+//!   [`ContainerRegistry`] instead of a hard-coded list. QOI has no
+//!   nested container layer (the file *is* the codec packet), so we
+//!   register no demuxer / muxer / probe — just the extension hint.
 //! * The `From<QoiError> for oxideav_core::Error` conversion that lets
 //!   the trait-side `Decoder` / `Encoder` impls (living in
 //!   `decoder.rs` / `encoder.rs`) bubble bitstream errors up through
 //!   the framework error type.
 
 use oxideav_core::{CodecCapabilities, CodecId, PixelFormat};
-use oxideav_core::{CodecInfo, CodecRegistry};
+use oxideav_core::{CodecInfo, CodecRegistry, ContainerRegistry};
 
 use crate::error::QoiError;
 
@@ -50,9 +55,35 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
     );
 }
 
+/// Register the `.qoi` file extension against the container name
+/// `"qoi"` so consumers (cli-convert, pipeline output probing, …) can
+/// resolve a `.qoi` output path through the central
+/// [`ContainerRegistry`] instead of a hard-coded extension list.
+///
+/// QOI is a single-image format with no nested container layer — the
+/// file *is* the codec packet — so we register only the extension
+/// hint here, no demuxer / muxer / probe. Callers that just want the
+/// codec side should keep using [`register_codecs`] / [`register`].
+pub fn register_containers(reg: &mut ContainerRegistry) {
+    reg.register_extension("qoi", "qoi");
+}
+
 /// Combined registration entry point. QOI has no nested container
 /// surface; the file *is* the codec packet, so this is just a thin
-/// alias for [`register_codecs`].
+/// alias for [`register_codecs`]. Use [`register_containers`]
+/// separately to wire the `.qoi` extension into the
+/// [`ContainerRegistry`].
 pub fn register(codecs: &mut CodecRegistry) {
     register_codecs(codecs);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn qoi_extension_resolves_to_qoi_container() {
+        let mut reg = oxideav_core::ContainerRegistry::new();
+        super::register_containers(&mut reg);
+        assert_eq!(reg.container_for_extension("qoi"), Some("qoi"));
+        assert_eq!(reg.container_for_extension("QOI"), Some("qoi")); // case insensitive
+    }
 }

@@ -55,11 +55,14 @@ plain `(w, h, channels, &[u8])` so callers don't need to construct an
 
 The crate's default `registry` Cargo feature pulls in `oxideav-core`
 and exposes the framework `Decoder` / `Encoder` trait surface plus a
-`registry::register` entry point. Disable the feature
-(`default-features = false`) for an `oxideav-core`-free build that
-still exposes the standalone `parse_qoi` / `encode_qoi` API plus
-crate-local `QoiImage` / `QoiChannels` / `QoiColorspace` / `QoiError`
-types.
+`registry::register` entry point. The sibling
+`registry::register_containers` call wires the `.qoi` file extension
+into a `ContainerRegistry` so cli-convert / pipeline output probing
+can resolve `.qoi` paths through the central registry instead of a
+hard-coded list. Disable the feature (`default-features = false`) for
+an `oxideav-core`-free build that still exposes the standalone
+`parse_qoi` / `encode_qoi` API plus crate-local `QoiImage` /
+`QoiChannels` / `QoiColorspace` / `QoiError` types.
 
 ## License
 
