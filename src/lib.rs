@@ -106,7 +106,7 @@ pub use error::{QoiError, Result};
 pub use image::{QoiChannels, QoiColorspace, QoiImage};
 
 #[cfg(feature = "registry")]
-pub use registry::{register, register_codecs, register_containers};
+pub use registry::{__oxideav_entry, register, register_codecs, register_containers};
 
 #[cfg(test)]
 mod tests {
