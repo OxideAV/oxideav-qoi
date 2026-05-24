@@ -1,0 +1,34 @@
+[package]
+name = "oxideav-qoi-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# QOI's decoder is the only thing worth fuzzing: a 14-byte header plus
+# a stream of 1- to 5-byte chunks plus an 8-byte end marker, all parsed
+# in a single linear pass. There is no external system library worth
+# pulling in as a cross-decode oracle (and the clean-room wall bars the
+# C reference `qoi.h` anyway), so this fuzz crate is **decode-only**:
+# feed arbitrary bytes to `parse_qoi` and assert it always returns a
+# `Result` rather than panicking / aborting / OOMing.
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-qoi]
+path = ".."
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false

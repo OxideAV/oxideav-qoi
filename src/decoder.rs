@@ -79,7 +79,10 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
     // Guard against width * height * channels overflowing usize on
     // unusual targets (the spec permits up to u32::MAX * u32::MAX,
     // which clearly exceeds any realistic memory limit). We reject
-    // the request before allocating.
+    // the request before allocating. Note this only rejects values
+    // that don't *fit* `usize`; a value that fits usize but exceeds
+    // available RAM (e.g. 65536×65536 ≈ 1 TB) is handled by the
+    // bounded pre-allocation below, not here.
     let pixel_count = (width as u64)
         .checked_mul(height as u64)
         .ok_or_else(|| Error::unsupported("QOI: width*height overflows u64"))?;
@@ -87,9 +90,14 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
     let total_bytes = pixel_count
         .checked_mul(bytes_per_pixel)
         .ok_or_else(|| Error::unsupported("QOI: width*height*channels overflows u64"))?;
-    let total_bytes_usize: usize = total_bytes
+    // The success of this conversion is the guard; the value itself is
+    // not used for sizing (see the bounded reservation below).
+    let _total_bytes_usize: usize = total_bytes
         .try_into()
         .map_err(|_| Error::unsupported("QOI: total pixel bytes overflows usize"))?;
+    let pixel_count_usize: usize = pixel_count
+        .try_into()
+        .map_err(|_| Error::unsupported("QOI: pixel count overflows usize"))?;
 
     let chunks = &input[HEADER_SIZE..input.len() - END_MARKER.len()];
     let trailer = &input[input.len() - END_MARKER.len()..];
@@ -97,7 +105,24 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
         return Err(Error::invalid("QOI: missing or invalid end marker"));
     }
 
-    let mut pixels = Vec::with_capacity(total_bytes_usize);
+    // Pre-allocate the output buffer, but DON'T trust the header's
+    // `width * height * channels` for the reservation size: it is
+    // attacker-controlled and a small (≈30-byte) file may claim e.g.
+    // 65536×65536 (≈1 TB of pixels). `total_bytes_usize` fits `usize`
+    // here yet vastly exceeds available memory, so a naive
+    // `Vec::with_capacity(total_bytes_usize)` aborts the process. The
+    // chunk stream physically can't decode to more pixels than
+    // `chunks.len() * 62` (one RUN byte emits at most 62 copies; every
+    // other op consumes ≥1 byte per pixel), so cap the eager
+    // reservation to what the input could actually produce. The
+    // `emitted == pixel_count` check at loop exit still enforces the
+    // header's claimed size — under-reserving only costs a few `Vec`
+    // re-grows on legitimately huge (but truncated → rejected) inputs,
+    // never correctness.
+    let max_decodable_pixels = chunks.len().saturating_mul(62);
+    let reserve_pixels = pixel_count_usize.min(max_decodable_pixels);
+    let reserve_bytes = reserve_pixels.saturating_mul(channels as usize);
+    let mut pixels = Vec::with_capacity(reserve_bytes);
 
     // Per-spec initial state: previous pixel = RGBA(0,0,0,255), index
     // array zero-filled.
@@ -105,9 +130,6 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
     let mut index: [[u8; 4]; 64] = [[0, 0, 0, 0]; 64];
 
     let mut pos = 0usize;
-    let pixel_count_usize: usize = pixel_count
-        .try_into()
-        .map_err(|_| Error::unsupported("QOI: pixel count overflows usize"))?;
     let mut emitted: usize = 0;
 
     while emitted < pixel_count_usize {

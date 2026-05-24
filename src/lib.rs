@@ -378,6 +378,31 @@ mod tests {
     }
 
     #[test]
+    fn huge_header_does_not_over_allocate() {
+        // Regression for a fuzz-discovered abort: a tiny (~30-byte)
+        // file may declare a 65536×65536 RGBA image (≈1 TB of pixels).
+        // `width*height*channels` fits `usize` on 64-bit targets, so
+        // the old eager `Vec::with_capacity(total_bytes)` asked the
+        // allocator for ~1 TB and aborted the process. The decoder
+        // must instead reject the stream cleanly: the few chunk bytes
+        // present can't possibly fill the claimed pixel count, so it
+        // reports a truncated stream rather than allocating.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&65536u32.to_be_bytes()); // width
+        bytes.extend_from_slice(&65536u32.to_be_bytes()); // height
+        bytes.push(4); // channels = RGBA
+        bytes.push(0); // colorspace = sRGB
+                       // A single RGB chunk's worth of payload, then the end marker —
+                       // nowhere near enough to fill 4.29e9 pixels.
+        bytes.push(OP_RGB);
+        bytes.extend_from_slice(&[1, 2, 3]);
+        bytes.extend_from_slice(END_MARKER);
+        // Must return Err (truncated), NOT abort/OOM.
+        assert!(matches!(parse_qoi(&bytes), Err(QoiError::InvalidData(_))));
+    }
+
+    #[test]
     fn colorspace_all_linear_roundtrips() {
         let pixels = vec![10, 20, 30, 255, 40, 50, 60, 255];
         let bytes = encode_qoi_full(2, 1, 4, /* colorspace */ 1, &pixels);

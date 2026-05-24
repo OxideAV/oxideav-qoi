@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `cargo-fuzz` harness under `fuzz/` with a `decode` target that feeds
+  arbitrary bytes to `parse_qoi` and asserts it never panics / aborts /
+  OOMs. Corpus seeded from the reference fixtures plus a huge-header
+  regression seed. Daily `fuzz.yml` workflow runs it via the org
+  reusable `crate-fuzz.yml` (30-minute budget).
+
+### Fixed
+
+- Decoder no longer aborts on a small file whose header claims a huge
+  image (e.g. 65536×65536 ≈ 1 TB). The output buffer reservation was
+  computed from the attacker-controlled `width * height * channels` and
+  handed straight to `Vec::with_capacity`, aborting the process. The
+  reservation is now bounded by the maximum number of pixels the chunk
+  stream can physically decode (`chunks.len() * 62`); an oversized
+  header is rejected as a truncated stream. Found by the new fuzz
+  harness. Regression test: `huge_header_does_not_over_allocate`.
+
 ## [0.1.1](https://github.com/OxideAV/oxideav-qoi/compare/v0.1.0...v0.1.1) - 2026-05-06
 
 ### Other

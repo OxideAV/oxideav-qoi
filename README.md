@@ -51,6 +51,28 @@ flat `pixels: Vec<u8>` (RGB or RGBA, no row padding). The encoder takes
 plain `(w, h, channels, &[u8])` so callers don't need to construct an
 `QoiImage` first.
 
+## Fuzzing
+
+The decoder has a [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz)
+harness under `fuzz/`. The `decode` target feeds arbitrary bytes to
+`parse_qoi` and asserts it always returns a `Result` rather than
+panicking, aborting, or OOMing:
+
+```sh
+cargo +nightly fuzz run decode
+```
+
+The corpus is seeded from the byte-exact reference fixtures in
+`tests/fixtures/` plus a regression seed for a small file whose header
+claims a ~1 TB image. That class of input is the one crash the harness
+found: the old decoder reserved the output buffer from the header's
+attacker-controlled `width * height * channels` and aborted on the
+allocation. The reservation is now bounded by what the chunk stream can
+physically decode (`chunks.len() * 62` pixels), so an oversized header
+is rejected as a truncated stream instead of crashing the process. A
+daily `fuzz.yml` workflow runs the target through the org reusable
+`crate-fuzz.yml` for a 30-minute budget.
+
 ## Standalone vs registry-integrated
 
 The crate's default `registry` Cargo feature pulls in `oxideav-core`
