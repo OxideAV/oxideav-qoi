@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Criterion benchmarks under `benches/` (`decode`, `encode`,
+  `roundtrip`), five scenarios each: natural-image gradient (RGBA
+  320×240 and RGB24 640×480), single-colour fill that's dominated by
+  `QOI_OP_RUN`, alpha-changing worst case that's almost-all
+  `QOI_OP_RGBA`, and an 8-colour cycle that exercises the
+  `QOI_OP_INDEX` hot path. All inputs are synthesised on the fly —
+  no committed fixture files. Round-156 baseline (Apple-silicon dev
+  box): decode ~540 MiB/s gradient → ~1.5 GiB/s solid; encode ~640
+  MiB/s gradient → ~2.1 GiB/s solid; full roundtrip ~335 MiB/s
+  gradient → ~915 MiB/s solid. Run with
+  `cargo bench -p oxideav-qoi --bench <name>`.
 - `cargo-fuzz` harness under `fuzz/` with a `decode` target that feeds
   arbitrary bytes to `parse_qoi` and asserts it never panics / aborts /
   OOMs. Corpus seeded from the reference fixtures plus a huge-header

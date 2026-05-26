@@ -51,6 +51,33 @@ flat `pixels: Vec<u8>` (RGB or RGBA, no row padding). The encoder takes
 plain `(w, h, channels, &[u8])` so callers don't need to construct an
 `QoiImage` first.
 
+## Benchmarks
+
+Criterion benchmarks under `benches/` cover the encoder and decoder
+hot paths plus the full encode→decode roundtrip. Each bench is
+self-contained — inputs are synthesised on the fly with the public
+encoder API, no committed fixture files. Five scenarios cover the
+op-mix surface:
+
+* a natural-image RGBA gradient with light xorshift noise (mixed
+  DIFF / LUMA / RGB / INDEX),
+* a larger RGB24 VGA gradient (alpha-unchanged path),
+* a single-colour 512×512 RGBA fill (`QOI_OP_RUN` dominated),
+* a per-pixel-changing-alpha worst case (`QOI_OP_RGBA` dominated),
+* an 8-colour cycle (`QOI_OP_INDEX` hot path).
+
+Round-156 baseline on an Apple-silicon dev box:
+
+| Scenario                          | Decode      | Encode      | Roundtrip   |
+| --------------------------------- | ----------- | ----------- | ----------- |
+| RGBA 320×240 gradient             | 540 MiB/s   | 640 MiB/s   | 335 MiB/s   |
+| RGB24 640×480 gradient            | 540 MiB/s   | 458 MiB/s   | 241 MiB/s   |
+| RGBA 512×512 solid (RUN-heavy)    | 1.55 GiB/s  | 2.13 GiB/s  | 915 MiB/s   |
+| RGBA 320×240 alpha-changing       | 1.22 GiB/s  | 1.05 GiB/s  | 588 MiB/s   |
+| RGBA 320×240 8-colour INDEX cycle | 1.35 GiB/s  | 1.99 GiB/s  | 832 MiB/s   |
+
+Run with `cargo bench -p oxideav-qoi --bench <decode|encode|roundtrip>`.
+
 ## Fuzzing
 
 The decoder has a [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz)
