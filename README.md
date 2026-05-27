@@ -80,25 +80,42 @@ Run with `cargo bench -p oxideav-qoi --bench <decode|encode|roundtrip>`.
 
 ## Fuzzing
 
-The decoder has a [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz)
-harness under `fuzz/`. The `decode` target feeds arbitrary bytes to
-`parse_qoi` and asserts it always returns a `Result` rather than
-panicking, aborting, or OOMing:
+Two [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
+live under `fuzz/`:
+
+* `decode` — feeds arbitrary bytes to `parse_qoi` and asserts the
+  decoder always returns a `Result` rather than panicking, aborting,
+  or OOMing.
+* `encode_roundtrip` — derives a small image header from the first 6
+  fuzz bytes (width / height each clamped to 1..=256, channels
+  ∈ {3, 4}, colorspace ∈ {0, 1}), repeats the remaining payload to
+  fill `w * h * channels` pixel bytes, calls `encode_qoi_full`, and
+  asserts `parse_qoi` returns the exact same `(width, height,
+  channels, colorspace, pixels)`. The QOI spec is lossless, so this
+  contract must hold for every well-formed input — any drift between
+  the encoder's chunk-selection priority chain (RUN > INDEX > DIFF >
+  LUMA > RGB / RGBA) and the decoder's chunk walker breaks it.
 
 ```sh
 cargo +nightly fuzz run decode
+cargo +nightly fuzz run encode_roundtrip
 ```
 
-The corpus is seeded from the byte-exact reference fixtures in
-`tests/fixtures/` plus a regression seed for a small file whose header
-claims a ~1 TB image. That class of input is the one crash the harness
-found: the old decoder reserved the output buffer from the header's
-attacker-controlled `width * height * channels` and aborted on the
-allocation. The reservation is now bounded by what the chunk stream can
-physically decode (`chunks.len() * 62` pixels), so an oversized header
-is rejected as a truncated stream instead of crashing the process. A
-daily `fuzz.yml` workflow runs the target through the org reusable
-`crate-fuzz.yml` for a 30-minute budget.
+The `decode` corpus is seeded from the byte-exact reference fixtures
+in `tests/fixtures/` plus a regression seed for a small file whose
+header claims a ~1 TB image. That class of input is the one crash the
+harness found: the old decoder reserved the output buffer from the
+header's attacker-controlled `width * height * channels` and aborted
+on the allocation. The reservation is now bounded by what the chunk
+stream can physically decode (`chunks.len() * 62` pixels), so an
+oversized header is rejected as a truncated stream instead of
+crashing the process. The `encode_roundtrip` corpus is seeded with
+five small inputs covering RUN-heavy (solid 4×4 RGB), DIFF / LUMA
+(2×2 RGBA), INDEX (8×8 RGBA cycle), single-pixel, and a clamped
+max-dim gradient. A 30-second local smoke run reaches ~1,000
+exec/s with no crashes; the daily `fuzz.yml` workflow runs both
+targets through the org reusable `crate-fuzz.yml` for a 30-minute
+budget each.
 
 ## Standalone vs registry-integrated
 

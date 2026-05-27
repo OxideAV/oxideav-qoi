@@ -7,13 +7,14 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
-# QOI's decoder is the only thing worth fuzzing: a 14-byte header plus
-# a stream of 1- to 5-byte chunks plus an 8-byte end marker, all parsed
-# in a single linear pass. There is no external system library worth
-# pulling in as a cross-decode oracle (and the clean-room wall bars the
-# C reference `qoi.h` anyway), so this fuzz crate is **decode-only**:
-# feed arbitrary bytes to `parse_qoi` and assert it always returns a
-# `Result` rather than panicking / aborting / OOMing.
+# QOI's surface is small but has two distinct fuzz contracts. The
+# decoder is a linear pass over a 14-byte header + 1- to 5-byte chunks
+# + 8-byte end marker that must always return a `Result` rather than
+# panicking / aborting / OOMing on attacker-supplied bytes. The
+# encoder + decoder pair forms a lossless roundtrip: parse(encode(px))
+# must equal px for every well-formed pixel input. The two targets
+# below cover those contracts independently — no external oracle is
+# pulled in (the clean-room wall bars `qoi.h` anyway).
 [dependencies]
 libfuzzer-sys = "0.4"
 
@@ -30,5 +31,19 @@ debug = 1
 [[bin]]
 name = "decode"
 path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+
+# Second target — encode → decode lossless roundtrip. The first 6
+# fuzz bytes pick the image shape (width / height clamped to 1..=256,
+# channels ∈ {3,4}, colorspace ∈ {0,1}); the rest are pixel bytes
+# (repeated to fill `w*h*channels`). The target asserts
+# `parse_qoi(encode_qoi_full(...)) == (w, h, channels, colorspace,
+# pixels)` — any drift between the encoder's chunk-selection order
+# (RUN > INDEX > DIFF > LUMA > RGB / RGBA) and the decoder's chunk
+# walker breaks this contract.
+[[bin]]
+name = "encode_roundtrip"
+path = "fuzz_targets/encode_roundtrip.rs"
 test = false
 doc = false

@@ -25,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OOMs. Corpus seeded from the reference fixtures plus a huge-header
   regression seed. Daily `fuzz.yml` workflow runs it via the org
   reusable `crate-fuzz.yml` (30-minute budget).
+- Second `cargo-fuzz` target `encode_roundtrip`: derives a small image
+  header from the first 6 fuzz bytes (w / h clamped 1..=256, channels
+  ∈ {3, 4}, colorspace ∈ {0, 1}), repeats the payload to fill
+  `w * h * channels` pixel bytes, encodes via `encode_qoi_full`, and
+  asserts `parse_qoi` returns the exact same `(w, h, channels,
+  colorspace, pixels)`. The QOI spec is lossless — any drift between
+  encoder chunk selection (RUN > INDEX > DIFF > LUMA > RGB / RGBA)
+  and the decoder breaks this contract. 30-second local smoke run:
+  33,637 iterations, ~1,000 exec/s, no crashes. Corpus seeded with
+  five small inputs covering RUN-heavy, DIFF/LUMA, INDEX, single-pixel,
+  and a clamped max-dim gradient.
 
 ### Fixed
 
