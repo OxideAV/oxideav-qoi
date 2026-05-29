@@ -78,6 +78,25 @@ Round-156 baseline on an Apple-silicon dev box:
 
 Run with `cargo bench -p oxideav-qoi --bench <decode|encode|roundtrip>`.
 
+## Profiling
+
+A round-175 standalone profile driver lives at
+`examples/profile_qoi.rs` with the baseline numbers + flamegraph
+recipe written up in `profile/README.md`. The five scenarios mirror
+the Criterion benches byte-for-byte; the driver runs a flat
+`Instant::now()` / `elapsed()` loop (no Criterion warm-up / sampling
+layers) so a `samply` or `cargo flamegraph` capture shows the codec
+hot path without sampling-framework noise. The worst encode scenario
+(RGBA 320×240 gradient at 612 MiB/s) is where the spec's chunk
+priority chain (RUN > INDEX > DIFF > LUMA > RGB / RGBA) burns the
+most time per pixel — the target for any future encoder optimisation
+round.
+
+```sh
+cargo run --release --example profile_qoi -- all
+cargo run --release --example profile_qoi -- encode 5000
+```
+
 ## Fuzzing
 
 Two [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets

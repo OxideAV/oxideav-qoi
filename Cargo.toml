@@ -54,3 +54,12 @@ harness = false
 [[bench]]
 name = "roundtrip"
 harness = false
+
+# Round 175 (depth-mode profiling): flat measure-this-thing driver
+# for `samply` / `cargo flamegraph` / `perf record`. Mirrors the
+# `benches/*.rs` scenarios byte-for-byte so a profile capture
+# corresponds to the bench rows. Standalone (`registry`-feature off)
+# is fine — the driver only uses `encode_qoi` / `parse_qoi`.
+[[example]]
+name = "profile_qoi"
+path = "examples/profile_qoi.rs"

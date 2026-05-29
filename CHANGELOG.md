@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-175 profile driver under `examples/profile_qoi.rs` plus a
+  baseline numbers document in `profile/README.md`. The driver is a
+  flat measure-this-thing harness (single `Instant::now()` /
+  `elapsed()` pair around a fixed iteration loop) covering the same
+  five chunk-mix scenarios as the Criterion benches: RGBA 320×240
+  gradient, RGB24 640×480 gradient, RGBA 512×512 solid-RUN, RGBA
+  320×240 alpha-changing, and RGBA 320×240 8-colour INDEX cycle.
+  Designed for `samply` / `cargo flamegraph` / `perf record` capture
+  where Criterion's warm-up + sampling layers would otherwise bury
+  the codec hot path. Apple-silicon baseline: decode 0.5–1.5 GiB/s,
+  encode 0.4–2.2 GiB/s, roundtrip 0.2–0.9 GiB/s; the worst encode
+  case (RGBA gradient with mixed DIFF/LUMA/RGB chunks at 612 MiB/s)
+  identifies the priority-chain walk in `encode_qoi_full` as the
+  target for any future encoder optimisation round. Run with
+  `cargo run --release --example profile_qoi -- <mode> [<iters>]`;
+  modes: `encode` / `decode` / `roundtrip` / `all`.
 - Criterion benchmarks under `benches/` (`decode`, `encode`,
   `roundtrip`), five scenarios each: natural-image gradient (RGBA
   320×240 and RGB24 640×480), single-colour fill that's dominated by
