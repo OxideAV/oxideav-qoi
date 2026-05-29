@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/OxideAV/oxideav-qoi/compare/v0.1.1...v0.1.2) - 2026-05-29
+
+### Other
+
+- exact-size output buffer + cursor-write hot path (r183)
+- flat samply-friendly driver + r175 baseline numbers (r175)
+- add encode_roundtrip cargo-fuzz target (r162)
+- criterion harnesses for decode / encode / roundtrip (r156)
+- add cargo-fuzz decode harness; fix huge-header allocation abort
+
 ### Changed
 
 - Round-183 decoder hot-path refactor: replaced the per-pixel
