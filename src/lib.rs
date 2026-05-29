@@ -403,6 +403,56 @@ mod tests {
     }
 
     #[test]
+    fn decoder_exact_size_buffer_run_only_stream() {
+        // Round-183 regression: the decoder's RUN arm now writes
+        // through a `chunks_exact_mut + copy_from_slice` filler into a
+        // pre-allocated `vec![0; pixel_count * bpp]` buffer instead of
+        // calling `push_pixel` N times. Exercise that path with a
+        // pure-RUN stream of varying lengths (including the 62-pixel
+        // chunk cap + the leftover modulo) to confirm the new filler
+        // produces byte-exact output for every modular boundary.
+        for w in [1usize, 61, 62, 63, 124, 125, 200] {
+            // Solid stream: every pixel equals the seed (0,0,0,255),
+            // so the entire image after the first pixel decodes to a
+            // sequence of RUN chunks (one per 62-pixel block, plus a
+            // tail).
+            let pixels = [0u8, 0, 0, 255].repeat(w);
+            let bytes = encode_qoi(w as u32, 1, 4, &pixels);
+            let back = parse_qoi(&bytes).expect("decode");
+            assert_eq!(
+                back.pixels, pixels,
+                "width={w}: round-trip mismatch on solid stream"
+            );
+        }
+    }
+
+    #[test]
+    fn decoder_exact_size_buffer_mixed_stream() {
+        // Round-183 regression: the non-RUN chunk arms now write
+        // through `write_pixel(&mut [u8], out_pos, …)` instead of
+        // appending to a `Vec<u8>`. Exercise every chunk arm with a
+        // synthetic stream that drives DIFF / LUMA / RGB / RGBA /
+        // INDEX through the new cursor-write path. The sequence is a
+        // small palette that hits the INDEX hot path on repeats,
+        // forces RGB on a large-delta jump, and forces RGBA on an
+        // alpha-changing pixel.
+        let pixels: Vec<u8> = vec![
+            10, 10, 10, 255, //  LUMA from (0,0,0,255)
+            11, 10, 9, 255, //   DIFF (small delta)
+            200, 50, 25, 255, // RGB (large delta, alpha unchanged)
+            10, 10, 10, 255, //  INDEX (matches the first pixel's slot)
+            10, 10, 10, 100, //  RGBA (alpha changed)
+        ];
+        let bytes = encode_qoi(5, 1, 4, &pixels);
+        let back = parse_qoi(&bytes).expect("decode");
+        assert_eq!(back.pixels, pixels);
+        // Also confirm width / height land back correctly through the
+        // exact-size pre-allocation path.
+        assert_eq!(back.width, 5);
+        assert_eq!(back.height, 1);
+    }
+
+    #[test]
     fn colorspace_all_linear_roundtrips() {
         let pixels = vec![10, 20, 30, 255, 40, 50, 60, 255];
         let bytes = encode_qoi_full(2, 1, 4, /* colorspace */ 1, &pixels);

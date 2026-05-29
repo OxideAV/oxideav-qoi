@@ -105,24 +105,31 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
         return Err(Error::invalid("QOI: missing or invalid end marker"));
     }
 
-    // Pre-allocate the output buffer, but DON'T trust the header's
-    // `width * height * channels` for the reservation size: it is
-    // attacker-controlled and a small (≈30-byte) file may claim e.g.
-    // 65536×65536 (≈1 TB of pixels). `total_bytes_usize` fits `usize`
-    // here yet vastly exceeds available memory, so a naive
+    // Pre-allocate the output buffer to its EXACT final size (one
+    // allocation, zero re-grows) and write through a moving cursor.
+    // The capacity reservation can't trust the header's
+    // `width * height * channels` directly — a small (≈30-byte) file
+    // may claim e.g. 65536×65536 (≈1 TB) and `total_bytes_usize` fits
+    // `usize` while vastly exceeding available memory, so a naive
     // `Vec::with_capacity(total_bytes_usize)` aborts the process. The
     // chunk stream physically can't decode to more pixels than
     // `chunks.len() * 62` (one RUN byte emits at most 62 copies; every
-    // other op consumes ≥1 byte per pixel), so cap the eager
-    // reservation to what the input could actually produce. The
-    // `emitted == pixel_count` check at loop exit still enforces the
-    // header's claimed size — under-reserving only costs a few `Vec`
-    // re-grows on legitimately huge (but truncated → rejected) inputs,
-    // never correctness.
+    // other op consumes ≥1 byte per pixel), so when the header's
+    // claimed pixel count exceeds that cap we reject the stream as
+    // truncated up-front rather than over-allocating. Once past the
+    // guard the exact-size `vec![0; bytes_per_pixel * pixel_count]`
+    // gives every write a known in-bounds slot — no per-pixel
+    // `push` bounds checks, no mid-loop reallocation. The RUN arm
+    // copies a 3-or-4-byte template into a contiguous slice in one
+    // `copy_from_slice` per channel layout instead of N per-byte
+    // `Vec::push` calls.
     let max_decodable_pixels = chunks.len().saturating_mul(62);
-    let reserve_pixels = pixel_count_usize.min(max_decodable_pixels);
-    let reserve_bytes = reserve_pixels.saturating_mul(channels as usize);
-    let mut pixels = Vec::with_capacity(reserve_bytes);
+    if pixel_count_usize > max_decodable_pixels {
+        return Err(Error::invalid("QOI: chunk stream truncated mid-image"));
+    }
+    let bpp = channels as usize;
+    let total_out_bytes = pixel_count_usize * bpp;
+    let mut pixels = vec![0u8; total_out_bytes];
 
     // Per-spec initial state: previous pixel = RGBA(0,0,0,255), index
     // array zero-filled.
@@ -130,9 +137,10 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
     let mut index: [[u8; 4]; 64] = [[0, 0, 0, 0]; 64];
 
     let mut pos = 0usize;
-    let mut emitted: usize = 0;
+    // Byte-cursor into `pixels`; advances by `bpp` per emitted pixel.
+    let mut out_pos: usize = 0;
 
-    while emitted < pixel_count_usize {
+    while out_pos < total_out_bytes {
         if pos >= chunks.len() {
             return Err(Error::invalid("QOI: chunk stream truncated mid-image"));
         }
@@ -149,9 +157,9 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
                 prev[2] = chunks[pos + 2];
                 // Alpha unchanged.
                 pos += 3;
-                push_pixel(&mut pixels, channels, prev);
+                write_pixel(&mut pixels, out_pos, channels, prev);
+                out_pos += bpp;
                 index[hash(prev) as usize] = prev;
-                emitted += 1;
             }
             Chunk::Rgba => {
                 if pos + 4 > chunks.len() {
@@ -162,18 +170,18 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
                 prev[2] = chunks[pos + 2];
                 prev[3] = chunks[pos + 3];
                 pos += 4;
-                push_pixel(&mut pixels, channels, prev);
+                write_pixel(&mut pixels, out_pos, channels, prev);
+                out_pos += bpp;
                 index[hash(prev) as usize] = prev;
-                emitted += 1;
             }
             Chunk::Index => {
                 let idx = (tag & 0x3F) as usize;
                 prev = index[idx];
-                push_pixel(&mut pixels, channels, prev);
+                write_pixel(&mut pixels, out_pos, channels, prev);
+                out_pos += bpp;
                 // Index already holds prev — re-storing is a no-op but
                 // keeps the loop body symmetric with the other arms.
                 index[hash(prev) as usize] = prev;
-                emitted += 1;
             }
             Chunk::Diff => {
                 // 2 bits each, biased by 2 → range −2..+1.
@@ -184,9 +192,9 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
                 prev[1] = prev[1].wrapping_add(dg as u8);
                 prev[2] = prev[2].wrapping_add(db as u8);
                 // Alpha unchanged.
-                push_pixel(&mut pixels, channels, prev);
+                write_pixel(&mut pixels, out_pos, channels, prev);
+                out_pos += bpp;
                 index[hash(prev) as usize] = prev;
-                emitted += 1;
             }
             Chunk::Luma => {
                 if pos >= chunks.len() {
@@ -203,20 +211,24 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
                 prev[1] = prev[1].wrapping_add(dg as u8);
                 prev[2] = prev[2].wrapping_add(db as u8);
                 // Alpha unchanged.
-                push_pixel(&mut pixels, channels, prev);
+                write_pixel(&mut pixels, out_pos, channels, prev);
+                out_pos += bpp;
                 index[hash(prev) as usize] = prev;
-                emitted += 1;
             }
             Chunk::Run => {
                 // 6-bit (run - 1) → real run length 1..=62. Tag values
                 // 0xfe / 0xff are stolen by the 8-bit RGB / RGBA tags.
                 let run = (tag & 0x3F) as usize + 1;
-                if emitted + run > pixel_count_usize {
+                let run_bytes = run * bpp;
+                if out_pos + run_bytes > total_out_bytes {
                     return Err(Error::invalid("QOI: run overshoots image size"));
                 }
-                for _ in 0..run {
-                    push_pixel(&mut pixels, channels, prev);
-                }
+                // Fast path: fill the contiguous run slice with the
+                // 3-or-4-byte pixel template. One bounds check per
+                // pixel inside `copy_from_slice` collapses to one
+                // bounds check per run for the outer slice index.
+                fill_run(&mut pixels[out_pos..out_pos + run_bytes], channels, prev);
+                out_pos += run_bytes;
                 // Per spec: "Each pixel that is seen by the encoder
                 // and decoder is put into this array at the position
                 // formed by [the] hash function." A RUN is *N* copies
@@ -225,7 +237,6 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
                 // before any non-RUN chunk has a chance to populate
                 // index[hash(prev)] for the initial (0,0,0,255) pixel.
                 index[hash(prev) as usize] = prev;
-                emitted += run;
             }
         }
     }
@@ -300,20 +311,49 @@ pub(crate) fn hash(p: [u8; 4]) -> u8 {
     ((r * 3 + g * 5 + b * 7 + a * 11) & 0x3F) as u8
 }
 
-/// Push a pixel into the output buffer in the requested channel layout.
+/// Write a pixel into the pre-allocated output buffer at byte offset
+/// `out_pos`, in the requested channel layout. Caller is responsible
+/// for keeping `out_pos + channels as usize` in bounds.
+///
+/// Replaces an earlier `push_pixel(&mut Vec<u8>, ...)` helper that did
+/// 3 or 4 individual `Vec::push` calls per pixel; the per-push capacity
+/// check + len-update was visible cost on the RUN-dominated decode
+/// path. The single `copy_from_slice` here folds both arms into one
+/// bounds check per pixel.
 #[inline]
-fn push_pixel(out: &mut Vec<u8>, channels: QoiChannels, p: [u8; 4]) {
+fn write_pixel(out: &mut [u8], out_pos: usize, channels: QoiChannels, p: [u8; 4]) {
     match channels {
         QoiChannels::Rgb => {
-            out.push(p[0]);
-            out.push(p[1]);
-            out.push(p[2]);
+            out[out_pos..out_pos + 3].copy_from_slice(&p[..3]);
         }
         QoiChannels::Rgba => {
-            out.push(p[0]);
-            out.push(p[1]);
-            out.push(p[2]);
-            out.push(p[3]);
+            out[out_pos..out_pos + 4].copy_from_slice(&p);
+        }
+    }
+}
+
+/// Fill an exact-length output slice with `count = slice.len() / bpp`
+/// copies of the pixel template `p`, in the requested channel layout.
+///
+/// Used by `QOI_OP_RUN`. A RUN encodes 1..=62 identical pixels — the
+/// previous implementation called `push_pixel` in a loop, paying a
+/// per-iteration `Vec::push`-bounds-check cost on what should be a
+/// straight-line memcpy. This helper writes the template once per
+/// pixel through a single slice index per pixel; the inner per-byte
+/// stores collapse to a tight unrolled loop the optimiser is happy
+/// to vectorise.
+#[inline]
+fn fill_run(out: &mut [u8], channels: QoiChannels, p: [u8; 4]) {
+    match channels {
+        QoiChannels::Rgb => {
+            for px in out.chunks_exact_mut(3) {
+                px.copy_from_slice(&p[..3]);
+            }
+        }
+        QoiChannels::Rgba => {
+            for px in out.chunks_exact_mut(4) {
+                px.copy_from_slice(&p);
+            }
         }
     }
 }

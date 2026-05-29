@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round-183 decoder hot-path refactor: replaced the per-pixel
+  `Vec::push`-based output writer (`decoder::push_pixel`) with an
+  exact-size `vec![0; pixel_count * bpp]` buffer + slice-cursor write
+  (`decoder::write_pixel`) plus a contiguous `chunks_exact_mut +
+  copy_from_slice` filler for RUN chunks (`decoder::fill_run`). The
+  capacity-truncation guard the round-162 fuzz harness added moves
+  from a runtime cap on the eager `Vec::with_capacity` reservation
+  to a pre-allocation check that rejects the request before
+  allocating; legitimate-input behaviour is unchanged. Decode
+  throughput on the round-175 profile baseline (Apple-silicon dev
+  box, release build):
+  | Scenario                          | Decode r175 | Decode r183 | Speedup |
+  | --------------------------------- | ----------- | ----------- | ------- |
+  | RGBA 320×240 gradient             | 708 MiB/s   |   899 MiB/s | 1.27×   |
+  | RGB24 640×480 gradient            | 521 MiB/s   |   616 MiB/s | 1.18×   |
+  | RGBA 512×512 solid-RUN            | 1.54 GiB/s  | 37.4 GiB/s  | 24.4×   |
+  | RGBA 320×240 alpha-changing       | 1.36 GiB/s  | 3.14 GiB/s  | 2.31×   |
+  | RGBA 320×240 8-colour INDEX cycle | 1.46 GiB/s  | 2.73 GiB/s  | 1.87×   |
+
+  The solid-RUN row is the dramatic case: every chunk is a RUN, every
+  RUN now lowers to a single `chunks_exact_mut + copy_from_slice`
+  loop the autovectoriser turns into a wide-store memcpy. The encoder
+  was not touched (its `Vec::push`-heavy chunk emitter is the target
+  for a future encoder-side optimisation round). All 24 pre-existing
+  unit tests + 5 fixture roundtrip tests + the doctest + the existing
+  fuzz harness corpora pass unchanged; two new regression tests
+  (`decoder_exact_size_buffer_run_only_stream` covering the RUN-only
+  `fill_run` path across the 62-pixel cap boundary, and
+  `decoder_exact_size_buffer_mixed_stream` covering DIFF / LUMA /
+  RGB / RGBA / INDEX via `write_pixel`) lock in the new cursor-write
+  contract.
+
 ### Added
 
 - Round-175 profile driver under `examples/profile_qoi.rs` plus a
