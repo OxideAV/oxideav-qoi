@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round-199 deterministic property-test sweep under
+  `tests/property_sweep.rs`. Eight test functions run roughly 4_000
+  pseudo-random `(width, height, channels, colorspace, pixels)`
+  triples through `encode_qoi_full → parse_qoi` and assert six
+  semantic invariants per case: lossless roundtrip, the worst-case
+  size bound `14 + n*5 + 8`, header bytes echoing the input,
+  encoder determinism, a tighter solid-fill compact bound of
+  `14 + 5 + ceil(n/62) + 8`, and idempotent re-encode
+  (`encode(decode(encode(px))) == encode(px)`). Five distinct input
+  generators (random, smooth-deltas, RUN-heavy, 8-colour palette,
+  alpha-churn) each exercise a different path through the encoder's
+  chunk-priority chain (RUN > INDEX > DIFF > LUMA > RGB / RGBA).
+  A separate sweep hammers the solid-fill bound at the 62-pixel
+  chunk-cap modular boundaries (widths 1, 30, 61, 62, 63, 124, 125,
+  187, 200, 512, 1024) and another targets skewed shapes (1×N,
+  N×1, prime×prime). The harness uses a self-contained xorshift32
+  PRNG seeded per scenario so any failure is reproducible from the
+  seed printed in the assertion message; no new dev-dep is
+  introduced (`proptest` / `quickcheck` deliberately avoided). All
+  40 tests in the crate now pass under both `--features registry`
+  and `--no-default-features`.
+
 ## [0.1.2](https://github.com/OxideAV/oxideav-qoi/compare/v0.1.1...v0.1.2) - 2026-05-29
 
 ### Other

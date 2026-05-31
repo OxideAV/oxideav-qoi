@@ -141,6 +141,32 @@ exec/s with no crashes; the daily `fuzz.yml` workflow runs both
 targets through the org reusable `crate-fuzz.yml` for a 30-minute
 budget each.
 
+## Property tests
+
+`tests/property_sweep.rs` (round 199, depth-mode) is a deterministic
+property-style sweep that complements the fuzz harness with hundreds
+of pseudo-random `(width, height, channels, colorspace, pixels)`
+triples per scenario. Six semantic invariants are asserted per case:
+
+1. lossless roundtrip `parse_qoi(encode_qoi_full(…)) == input`,
+2. worst-case size bound `bytes.len() <= 14 + n*5 + 8`,
+3. header bytes and end marker echo the input,
+4. encoder determinism (same input → same bytes twice),
+5. tighter solid-fill bound `14 + 5 + ceil(n/62) + 8`,
+6. idempotent re-encode `encode(decode(encode(px))) == encode(px)`.
+
+Five input generators (random, smooth-deltas, RUN-heavy, 8-colour
+palette, alpha-churn) exercise different paths through the encoder's
+chunk-priority chain. A self-contained xorshift32 PRNG is seeded
+per scenario so any failure is reproducible from the seed printed in
+the assertion message; no `proptest` / `quickcheck` dev-dep is
+introduced. Roughly 4_000 distinct cases run in well under a second
+on a release build:
+
+```sh
+cargo test -p oxideav-qoi --test property_sweep
+```
+
 ## Standalone vs registry-integrated
 
 The crate's default `registry` Cargo feature pulls in `oxideav-core`
