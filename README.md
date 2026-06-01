@@ -66,17 +66,17 @@ op-mix surface:
 * a per-pixel-changing-alpha worst case (`QOI_OP_RGBA` dominated),
 * an 8-colour cycle (`QOI_OP_INDEX` hot path).
 
-Round-183 baseline on an Apple-silicon dev box (post-decoder-exact-
-size-buffer refactor — see `profile/README.md` "Round-183 delta" for
-the side-by-side):
+Round-205 baseline on an Apple-silicon dev box (post-encoder-
+cursor-write refactor — see `profile/README.md` "Round-205 delta"
+for the side-by-side; decode column unchanged since r183):
 
 | Scenario                          | Decode      | Encode      | Roundtrip   |
 | --------------------------------- | ----------- | ----------- | ----------- |
-| RGBA 320×240 gradient             |   899 MiB/s |   628 MiB/s |   363 MiB/s |
-| RGB24 640×480 gradient            |   616 MiB/s |   431 MiB/s |   256 MiB/s |
-| RGBA 512×512 solid (RUN-heavy)    |  37.4 GiB/s |  2.10 GiB/s |  2.02 GiB/s |
-| RGBA 320×240 alpha-changing       |  3.14 GiB/s |  1.03 GiB/s |   798 MiB/s |
-| RGBA 320×240 8-colour INDEX cycle |  2.73 GiB/s |  1.98 GiB/s |  1.17 GiB/s |
+| RGBA 320×240 gradient             |   927 MiB/s |   891 MiB/s |   460 MiB/s |
+| RGB24 640×480 gradient            |   628 MiB/s |   593 MiB/s |   292 MiB/s |
+| RGBA 512×512 solid (RUN-heavy)    |  37.7 GiB/s |  2.26 GiB/s |  2.12 GiB/s |
+| RGBA 320×240 alpha-changing       |  3.13 GiB/s |  1.97 GiB/s |  1.19 GiB/s |
+| RGBA 320×240 8-colour INDEX cycle |  2.75 GiB/s |  2.37 GiB/s |  1.26 GiB/s |
 
 Run with `cargo bench -p oxideav-qoi --bench <decode|encode|roundtrip>`.
 
@@ -92,10 +92,17 @@ hot path without sampling-framework noise. Round 183 refreshed the
 decode column after replacing the per-pixel `Vec::push` output writer
 with an exact-size `vec![0; n]` buffer + slice-cursor write; the
 solid-RUN row now hits ~37 GiB/s as the inner write lowers to a wide
-memcpy. The worst encode scenario (RGBA 320×240 gradient at ~625
-MiB/s) is where the spec's chunk priority chain (RUN > INDEX > DIFF
-> LUMA > RGB / RGBA) burns the most time per pixel — the target for
-any future encoder-side optimisation round.
+memcpy. Round 205 took the same cursor-write idea to the encoder:
+pre-allocate the upper-bound `vec![0; 14 + n*5 + 8]` once, write
+every chunk through `buf[out_pos] = …` + `buf[…].copy_from_slice`,
+truncate down to the actual produced length at return. The
+gradient row (the worst encode scenario, where the chunk priority
+chain RUN > INDEX > DIFF > LUMA > RGB / RGBA runs the most picker
+work per pixel) moved from 624 MiB/s → 930 MiB/s (1.49×); the
+alpha-changing row (almost-every-pixel RGBA) moved from 1.06 GiB/s
+→ 1.96 GiB/s (1.85×) as the per-pixel emit collapsed from five
+`Vec::push` calls to a single 4-byte `copy_from_slice` after the
+tag store.
 
 ```sh
 cargo run --release --example profile_qoi -- all

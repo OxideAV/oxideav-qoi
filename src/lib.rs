@@ -2,8 +2,8 @@
 //!
 //! Clean-room implementation of the one-page specification published at
 //! [qoiformat.org](https://qoiformat.org/qoi-specification.pdf). No
-//! reference-implementation source code (`qoi.h`, `qoi-rust`,
-//! `rapid-qoi`, the `image` crate's QOI module, …) was consulted.
+//! third-party source code was consulted; the spec PDF is the sole
+//! source of truth.
 //!
 //! ## What QOI is
 //!
@@ -450,6 +450,90 @@ mod tests {
         // exact-size pre-allocation path.
         assert_eq!(back.width, 5);
         assert_eq!(back.height, 1);
+    }
+
+    #[test]
+    fn encoder_exact_size_buffer_run_only_stream() {
+        // Round-205 regression: the encoder's RUN arm now writes the
+        // single-byte run tag via an indexed `buf[out_pos] = …` store
+        // into a pre-allocated upper-bound buffer instead of `Vec::push`.
+        // Exercise that path with a pure-RUN stream of varying lengths
+        // (including the 62-pixel chunk cap + the leftover modulo) to
+        // confirm the new cursor write produces byte-exact output for
+        // every modular boundary that crosses the cap. Also covers the
+        // first-pixel-equals-seed fast path where the very first chunk
+        // is a RUN (no LUMA / DIFF preface).
+        for w in [1usize, 61, 62, 63, 124, 125, 200] {
+            let pixels = [0u8, 0, 0, 255].repeat(w);
+            let bytes = encode_qoi(w as u32, 1, 4, &pixels);
+            // Header (14) + ceil(w / 62) RUN bytes + end marker (8).
+            let expected_len = 14 + w.div_ceil(62) + 8;
+            assert_eq!(
+                bytes.len(),
+                expected_len,
+                "width={w}: solid-RUN encoded length mismatch"
+            );
+            let back = parse_qoi(&bytes).expect("decode");
+            assert_eq!(
+                back.pixels, pixels,
+                "width={w}: round-trip mismatch on solid stream"
+            );
+        }
+    }
+
+    #[test]
+    fn encoder_exact_size_buffer_mixed_stream() {
+        // Round-205 regression: the non-RUN chunk arms now write
+        // through `buf[out_pos] = …` + `buf[out_pos..].copy_from_slice`
+        // stores instead of `Vec::push` / `extend_from_slice`. Exercise
+        // every chunk arm with a synthetic stream that drives DIFF /
+        // LUMA / RGB / RGBA / INDEX through the new cursor path. The
+        // sequence is a small palette that hits the INDEX hot path on
+        // repeats, forces RGB on a large-delta jump, and forces RGBA
+        // on an alpha-changing pixel.
+        let pixels: Vec<u8> = vec![
+            10, 10, 10, 255, //  LUMA from (0,0,0,255)
+            11, 10, 9, 255, //   DIFF (small delta)
+            200, 50, 25, 255, // RGB (large delta, alpha unchanged)
+            10, 10, 10, 255, //  INDEX (matches the first pixel's slot)
+            10, 10, 10, 100, //  RGBA (alpha changed)
+        ];
+        let bytes = encode_qoi(5, 1, 4, &pixels);
+        // Header (14) + LUMA (2) + DIFF (1) + RGB (4) + INDEX (1) +
+        // RGBA (5) + end marker (8) = 35.
+        assert_eq!(bytes.len(), 35);
+        let back = parse_qoi(&bytes).expect("decode");
+        assert_eq!(back.pixels, pixels);
+        assert_eq!(back.width, 5);
+        assert_eq!(back.height, 1);
+    }
+
+    #[test]
+    fn encoder_truncates_to_actual_len() {
+        // Round-205 regression: the encoder pre-allocates an
+        // upper-bound `vec![0; 14 + n*5 + 8]` and truncates down to
+        // the actual produced length before return. For a heavily
+        // compressed input (solid fill — runs cap at 62 so a 200-pixel
+        // stream encodes to a tiny payload) the returned Vec's `len`
+        // must equal the encoded size, NOT the upper-bound capacity.
+        let pixels = [200u8, 50, 25, 255].repeat(200);
+        let bytes = encode_qoi(200, 1, 4, &pixels);
+        // Worst case would be 14 + 200*5 + 8 = 1022. Actual: first
+        // pixel is an RGB chunk (4 bytes), then ceil(199/62) = 4 RUN
+        // bytes, then end marker — well under the upper bound. The
+        // returned Vec's len() must reflect the truncated size.
+        assert!(
+            bytes.len() < 14 + 200 * 5 + 8,
+            "encoded length {} should be much less than worst-case upper bound",
+            bytes.len()
+        );
+        // Sanity: every byte after position bytes.len() in the original
+        // upper-bound allocation would have been the zero-fill from
+        // `vec![0u8; cap]`. Truncation must drop those — otherwise the
+        // decoder would see trailing zero bytes between the last chunk
+        // and the end marker and reject the stream.
+        let back = parse_qoi(&bytes).expect("decode");
+        assert_eq!(back.pixels, pixels);
     }
 
     #[test]

@@ -96,17 +96,37 @@ pub fn encode_qoi_full(
         QoiChannels::Rgb
     };
 
-    // Reserve a generous upper-bound for the output: header (14) +
-    // worst-case 5 bytes per pixel (QOI_OP_RGBA) + end marker (8).
-    let cap = 14 + (width as usize) * (height as usize) * 5 + END_MARKER.len();
-    let mut out = Vec::with_capacity(cap);
+    // Pre-allocate the output buffer to its EXACT worst-case upper
+    // bound — header (14) + 5 bytes per pixel (the QOI_OP_RGBA
+    // chunk, the widest chunk in the spec) + 8-byte end marker —
+    // and write through a moving byte cursor `out_pos` into the
+    // backing slice. The hot-path emit sites then become plain
+    // indexed stores instead of `Vec::push` / `extend_from_slice`
+    // calls; the per-call capacity check + length update the
+    // optimiser cannot prove unnecessary on `Vec` goes away. The
+    // backing buffer is truncated to `out_pos` before return, so
+    // callers see a `Vec<u8>` of the same logical length as before
+    // — the only visible change is performance. This mirrors the
+    // round-183 decoder refactor that replaced per-pixel
+    // `Vec::push` writes with `&mut [u8]` cursor stores.
+    //
+    // Worst case is realised by `encode_alpha_changing_rgba` (every
+    // pixel becomes a 5-byte RGBA chunk); on the solid-fill / index
+    // / DIFF paths the over-allocation never materialises because
+    // the buffer is truncated to the actual `out_pos` at return.
+    let pixel_count = (width as usize) * (height as usize);
+    let cap = 14 + pixel_count * 5 + END_MARKER.len();
+    let mut buf = vec![0u8; cap];
 
-    // Header.
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&width.to_be_bytes());
-    out.extend_from_slice(&height.to_be_bytes());
-    out.push(channels);
-    out.push(colorspace);
+    // Header — exactly 14 bytes into the head of the buffer. One
+    // `copy_from_slice` per field avoids the `extend_from_slice`
+    // capacity-growth probes the previous version paid.
+    buf[0..4].copy_from_slice(MAGIC);
+    buf[4..8].copy_from_slice(&width.to_be_bytes());
+    buf[8..12].copy_from_slice(&height.to_be_bytes());
+    buf[12] = channels;
+    buf[13] = colorspace;
+    let mut out_pos: usize = 14;
 
     // Per-spec initial state: previous pixel = RGBA(0,0,0,255), index
     // array zero-filled.
@@ -114,7 +134,6 @@ pub fn encode_qoi_full(
     let mut index: [[u8; 4]; 64] = [[0, 0, 0, 0]; 64];
     let mut run: u8 = 0;
 
-    let pixel_count = (width as usize) * (height as usize);
     let bpp = channels as usize;
 
     for i in 0..pixel_count {
@@ -144,20 +163,23 @@ pub fn encode_qoi_full(
             // to flush even if the next pixel matches.
             if run == 62 || i + 1 == pixel_count {
                 // Encode the QOI_OP_RUN with bias of −1.
-                out.push(OP_RUN | (run - 1));
+                buf[out_pos] = OP_RUN | (run - 1);
+                out_pos += 1;
                 run = 0;
             }
         } else {
             // Any pending run must be flushed before we emit a new
             // chunk for `cur`.
             if run > 0 {
-                out.push(OP_RUN | (run - 1));
+                buf[out_pos] = OP_RUN | (run - 1);
+                out_pos += 1;
                 run = 0;
             }
 
             let h = hash(cur) as usize;
             if index[h] == cur {
-                out.push(OP_INDEX | h as u8);
+                buf[out_pos] = OP_INDEX | h as u8;
+                out_pos += 1;
             } else {
                 index[h] = cur;
 
@@ -168,11 +190,11 @@ pub fn encode_qoi_full(
                     let db = cur[2].wrapping_sub(prev[2]) as i8 as i32;
 
                     if (-2..=1).contains(&dr) && (-2..=1).contains(&dg) && (-2..=1).contains(&db) {
-                        let byte = OP_DIFF
+                        buf[out_pos] = OP_DIFF
                             | (((dr + 2) as u8) << 4)
                             | (((dg + 2) as u8) << 2)
                             | ((db + 2) as u8);
-                        out.push(byte);
+                        out_pos += 1;
                     } else {
                         let dr_dg = dr - dg;
                         let db_dg = db - dg;
@@ -180,22 +202,26 @@ pub fn encode_qoi_full(
                             && (-8..=7).contains(&dr_dg)
                             && (-8..=7).contains(&db_dg)
                         {
-                            out.push(OP_LUMA | ((dg + 32) as u8));
-                            out.push((((dr_dg + 8) as u8) << 4) | ((db_dg + 8) as u8));
+                            buf[out_pos] = OP_LUMA | ((dg + 32) as u8);
+                            buf[out_pos + 1] = (((dr_dg + 8) as u8) << 4) | ((db_dg + 8) as u8);
+                            out_pos += 2;
                         } else {
-                            out.push(OP_RGB);
-                            out.push(cur[0]);
-                            out.push(cur[1]);
-                            out.push(cur[2]);
+                            // RGB chunk: tag + 3 pixel bytes. The
+                            // 4-wide slice copy lets the optimiser
+                            // fold the four stores into a single
+                            // word write on platforms that align it.
+                            buf[out_pos] = OP_RGB;
+                            buf[out_pos + 1..out_pos + 4].copy_from_slice(&cur[..3]);
+                            out_pos += 4;
                         }
                     }
                 } else {
-                    // Alpha changed → must be RGBA.
-                    out.push(OP_RGBA);
-                    out.push(cur[0]);
-                    out.push(cur[1]);
-                    out.push(cur[2]);
-                    out.push(cur[3]);
+                    // Alpha changed → must be RGBA. Tag + 4 pixel
+                    // bytes; the 4-byte `copy_from_slice` is the
+                    // fast straight-line memcpy of the full pixel.
+                    buf[out_pos] = OP_RGBA;
+                    buf[out_pos + 1..out_pos + 5].copy_from_slice(&cur);
+                    out_pos += 5;
                 }
             }
         }
@@ -203,8 +229,14 @@ pub fn encode_qoi_full(
     }
 
     // End marker.
-    out.extend_from_slice(END_MARKER);
-    out
+    buf[out_pos..out_pos + END_MARKER.len()].copy_from_slice(END_MARKER);
+    out_pos += END_MARKER.len();
+
+    // Truncate the worst-case allocation down to the actual produced
+    // length so callers see the same `Vec<u8>` shape as before. This
+    // is `Vec::truncate` (no reallocation, just lowers `len`).
+    buf.truncate(out_pos);
+    buf
 }
 
 // ---------------------------------------------------------------------------

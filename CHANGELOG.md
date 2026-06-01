@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round-205 encoder hot-path refactor: replaced the per-chunk
+  `Vec::push` / `Vec::extend_from_slice` emit pattern with an
+  exact-size `vec![0u8; 14 + pixel_count * 5 + END_MARKER.len()]`
+  pre-allocation + moving `out_pos` byte cursor that writes every
+  chunk through indexed `buf[out_pos] = …` stores (single-byte tags)
+  or `buf[out_pos..].copy_from_slice` (multi-byte chunks). The
+  buffer is truncated down to the actual produced length at return,
+  so the public `encode_qoi` / `encode_qoi_full` signature is
+  unchanged. Worst-case allocation is realised only on the
+  alpha-changing-every-pixel path; on the solid-fill / index / DIFF
+  paths the over-allocation never materialises because the buffer
+  is truncated to the actual `out_pos` at return. Mirrors the
+  round-183 decoder refactor that replaced per-pixel `Vec::push`
+  writes with `&mut [u8]` cursor stores. Encode throughput on the
+  round-175 profile baseline (Apple-silicon dev box, release build,
+  1000-iter `examples/profile_qoi.rs` run):
+
+  | Scenario                          | Encode r183 | Encode r205 | Speedup |
+  | --------------------------------- | ----------- | ----------- | ------- |
+  | RGBA 320×240 gradient             |   624 MiB/s |   930 MiB/s | 1.49×   |
+  | RGB24 640×480 gradient            |   431 MiB/s |   569 MiB/s | 1.32×   |
+  | RGBA 512×512 solid-RUN            |  2.12 GiB/s |  2.29 GiB/s | 1.08×   |
+  | RGBA 320×240 alpha-changing       |  1.06 GiB/s |  1.96 GiB/s | 1.85×   |
+  | RGBA 320×240 8-colour INDEX cycle |  2.07 GiB/s |  2.44 GiB/s | 1.18×   |
+
+  The gradient and alpha-changing rows are the dramatic cases: the
+  per-chunk emit collapses to a tag store + at most one 4-byte
+  `copy_from_slice` instead of five separate `Vec::push` calls. All
+  29 pre-existing unit tests + 8 property-sweep tests + 5 fixture
+  byte-exact tests + the doctest pass under both `--features
+  registry` and `--no-default-features`; three new regression tests
+  (`encoder_exact_size_buffer_run_only_stream` covering the RUN-arm
+  tag-store path across the 62-pixel cap boundary,
+  `encoder_exact_size_buffer_mixed_stream` covering DIFF / LUMA /
+  RGB / RGBA / INDEX via the indexed-store and `copy_from_slice`
+  paths, and `encoder_truncates_to_actual_len` confirming the
+  post-emit `Vec::truncate` drops trailing zero bytes from the
+  worst-case allocation so the decoder doesn't see them between
+  the last chunk and the end marker) lock in the new cursor-write
+  contract.
+
 ### Added
 
 - Round-199 deterministic property-test sweep under
