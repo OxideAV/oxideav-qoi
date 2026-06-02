@@ -34,6 +34,41 @@ pub enum QoiColorspace {
     AllLinear = 1,
 }
 
+/// Cheap header-only view of a QOI file, returned by
+/// [`crate::parse_qoi_header`].
+///
+/// Lets callers probe an in-memory `.qoi` byte slice for its on-disk
+/// metadata — width, height, channels, colorspace — without spending
+/// the time and memory needed to walk the chunk stream and materialise
+/// every pixel. Useful for thumbnail-grid probing, output-size
+/// estimation before allocating a decode buffer, and rejecting files
+/// whose dimensions exceed a per-application limit before the full
+/// decoder gets involved.
+///
+/// The four fields are the same as the corresponding fields on
+/// [`QoiImage`], with the same `(u32, u32, QoiChannels, QoiColorspace)`
+/// types — so a future `parse_qoi(bytes)?` call on the same bytes will
+/// agree byte-for-byte with what the header view reports here.
+///
+/// Header validation is the same set of checks the full decoder runs
+/// before touching the chunk stream: magic = `qoif`, `channels` ∈
+/// `{3, 4}`, `colorspace` ∈ `{0, 1}`, width and height ≠ 0. The
+/// post-header chunk stream + end marker are NOT inspected — a file
+/// whose header parses successfully here can still fail
+/// [`crate::parse_qoi`] later if the body is truncated or the end
+/// marker is wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QoiHeader {
+    /// Picture width in pixels.
+    pub width: u32,
+    /// Picture height in pixels.
+    pub height: u32,
+    /// 3 (RGB) or 4 (RGBA).
+    pub channels: QoiChannels,
+    /// Colorspace hint (informational; does not affect pixel bytes).
+    pub colorspace: QoiColorspace,
+}
+
 /// One decoded QOI image, framework-free shape.
 ///
 /// `pixels` is a flat row-major byte buffer with no row padding:

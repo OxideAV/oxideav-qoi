@@ -31,9 +31,14 @@ files we have access to.
 ## API
 
 ```rust
-use oxideav_qoi::{parse_qoi, encode_qoi, QoiImage, QoiChannels};
+use oxideav_qoi::{parse_qoi, parse_qoi_header, encode_qoi, QoiImage, QoiChannels};
 
-// Decode a complete QOI file.
+// Cheap header-only probe — no chunk walk, no pixel buffer allocated.
+// Useful for thumbnail-grid metadata + pre-size limit checks.
+let hdr = parse_qoi_header(&qoi_bytes)?;
+println!("{}x{} {:?}", hdr.width, hdr.height, hdr.channels);
+
+// Decode the full file.
 let img: QoiImage = parse_qoi(&qoi_bytes)?;
 assert!(matches!(img.channels, QoiChannels::Rgba | QoiChannels::Rgb));
 
@@ -49,7 +54,13 @@ let bytes: Vec<u8> = encode_qoi(
 `QoiImage` carries `width`, `height`, `channels`, `colorspace`, and a
 flat `pixels: Vec<u8>` (RGB or RGBA, no row padding). The encoder takes
 plain `(w, h, channels, &[u8])` so callers don't need to construct an
-`QoiImage` first.
+`QoiImage` first. `QoiHeader` is the same metadata tuple without the
+pixel buffer — returned by `parse_qoi_header` for cases where the
+caller only needs to know the on-disk dimensions / channel count, e.g.
+to size a destination buffer or reject oversized inputs before
+committing to a full decode. The probe inspects only the 14-byte
+header; it accepts inputs as short as 14 bytes and does not walk the
+chunk stream or check the end marker.
 
 ## Benchmarks
 

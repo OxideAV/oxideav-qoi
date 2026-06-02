@@ -17,7 +17,7 @@
 //! pixel bytes.
 
 use crate::error::{QoiError as Error, Result};
-use crate::image::{QoiChannels, QoiColorspace, QoiImage};
+use crate::image::{QoiChannels, QoiColorspace, QoiHeader, QoiImage};
 use crate::{END_MARKER, HEADER_SIZE, MAGIC, OP_DIFF, OP_INDEX, OP_LUMA, OP_RGB, OP_RGBA, OP_RUN};
 
 #[cfg(feature = "registry")]
@@ -29,22 +29,43 @@ use oxideav_core::{CodecId, CodecParameters, Frame, Packet, VideoFrame, VideoPla
 // Public standalone API
 // ---------------------------------------------------------------------------
 
-/// Decode a complete QOI file (`qoif` header + chunks + end marker)
-/// into a [`QoiImage`].
+/// Cheap header-only probe of a QOI byte slice.
 ///
-/// Returns [`QoiError::InvalidData`] for any of:
+/// Validates the same 14-byte header [`parse_qoi`] would and returns
+/// the parsed metadata — width, height, channels, colorspace — without
+/// touching the chunk stream or allocating a pixel buffer. The post-
+/// header body is *not* inspected: a file whose header parses
+/// successfully here can still fail [`parse_qoi`] later if the chunk
+/// stream is truncated or the trailing end marker is missing/wrong.
+///
+/// Intended for thumbnail-grid probing, pixel-buffer pre-sizing, and
+/// per-application limit checks (e.g. "reject any `.qoi` larger than
+/// 8K × 8K before allocating a decode buffer") where decoding the full
+/// pixel stream would be wasteful.
+///
+/// Returns [`QoiError::InvalidData`] for the same header-level errors
+/// `parse_qoi` does:
 /// * input shorter than the 14-byte header,
 /// * leading bytes ≠ `qoif`,
 /// * `channels` field ≠ 3 and ≠ 4,
 /// * `colorspace` field ≠ 0 and ≠ 1,
-/// * width or height = 0,
-/// * any chunk runs past the end of the stream,
-/// * the trailing 8-byte end marker is missing or wrong.
-pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
-    if input.len() < HEADER_SIZE + END_MARKER.len() {
-        return Err(Error::invalid(
-            "QOI: input shorter than header + end marker",
-        ));
+/// * width or height = 0.
+///
+/// Note `parse_qoi_header` accepts inputs as short as 14 bytes (the
+/// header alone). `parse_qoi` rejects anything shorter than
+/// `14 + 8 = 22` bytes because it also requires the trailing end
+/// marker; the header probe does not.
+pub fn parse_qoi_header(input: &[u8]) -> Result<QoiHeader> {
+    parse_header_only(input)
+}
+
+/// Internal header-only parser shared by [`parse_qoi`] and
+/// [`parse_qoi_header`]. Single source of truth for the per-field
+/// validity tests so a future spec clarification (e.g. a new colorspace
+/// value) propagates to both entry points in one edit.
+fn parse_header_only(input: &[u8]) -> Result<QoiHeader> {
+    if input.len() < HEADER_SIZE {
+        return Err(Error::invalid("QOI: input shorter than 14-byte header"));
     }
     if &input[0..4] != MAGIC {
         return Err(Error::invalid("QOI: missing 'qoif' magic"));
@@ -75,6 +96,38 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
     if width == 0 || height == 0 {
         return Err(Error::invalid("QOI: zero dimension in header"));
     }
+
+    Ok(QoiHeader {
+        width,
+        height,
+        channels,
+        colorspace,
+    })
+}
+
+/// Decode a complete QOI file (`qoif` header + chunks + end marker)
+/// into a [`QoiImage`].
+///
+/// Returns [`QoiError::InvalidData`] for any of:
+/// * input shorter than the 14-byte header,
+/// * leading bytes ≠ `qoif`,
+/// * `channels` field ≠ 3 and ≠ 4,
+/// * `colorspace` field ≠ 0 and ≠ 1,
+/// * width or height = 0,
+/// * any chunk runs past the end of the stream,
+/// * the trailing 8-byte end marker is missing or wrong.
+pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
+    if input.len() < HEADER_SIZE + END_MARKER.len() {
+        return Err(Error::invalid(
+            "QOI: input shorter than header + end marker",
+        ));
+    }
+    let QoiHeader {
+        width,
+        height,
+        channels,
+        colorspace,
+    } = parse_header_only(input)?;
 
     // Guard against width * height * channels overflowing usize on
     // unusual targets (the spec permits up to u32::MAX * u32::MAX,

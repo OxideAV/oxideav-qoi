@@ -100,10 +100,10 @@ pub const OP_LUMA: u8 = 0x80;
 /// 2-bit chunk tag prefix for `QOI_OP_RUN` (`11xxxxxx`).
 pub const OP_RUN: u8 = 0xC0;
 
-pub use decoder::parse_qoi;
+pub use decoder::{parse_qoi, parse_qoi_header};
 pub use encoder::{encode_qoi, encode_qoi_full};
 pub use error::{QoiError, Result};
-pub use image::{QoiChannels, QoiColorspace, QoiImage};
+pub use image::{QoiChannels, QoiColorspace, QoiHeader, QoiImage};
 
 #[cfg(feature = "registry")]
 pub use registry::{__oxideav_entry, register, register_codecs, register_containers};
@@ -534,6 +534,203 @@ mod tests {
         // and the end marker and reject the stream.
         let back = parse_qoi(&bytes).expect("decode");
         assert_eq!(back.pixels, pixels);
+    }
+
+    #[test]
+    fn parse_header_extracts_metadata_without_body_walk() {
+        // Round-210 depth-mode: header-only probe agrees with the full
+        // decode on (width, height, channels, colorspace). The header
+        // probe doesn't walk the chunk stream, so this also confirms
+        // the four fields live in the same byte offsets the spec lays
+        // out (0..4 magic, 4..8 width BE, 8..12 height BE, 12 channels,
+        // 13 colorspace).
+        let pixels = rgba_checker(16, 12);
+        let bytes = encode_qoi(16, 12, 4, &pixels);
+        let hdr = decoder::parse_qoi_header(&bytes).expect("header parse");
+        assert_eq!(hdr.width, 16);
+        assert_eq!(hdr.height, 12);
+        assert_eq!(hdr.channels, QoiChannels::Rgba);
+        assert_eq!(hdr.colorspace, QoiColorspace::SrgbWithLinearAlpha);
+
+        // And the full decode agrees byte-for-byte on the same fields.
+        let img = parse_qoi(&bytes).unwrap();
+        assert_eq!(img.width, hdr.width);
+        assert_eq!(img.height, hdr.height);
+        assert_eq!(img.channels, hdr.channels);
+        assert_eq!(img.colorspace, hdr.colorspace);
+    }
+
+    #[test]
+    fn parse_header_accepts_14_byte_input() {
+        // Header probe must accept a 14-byte slice (the bare header)
+        // even though `parse_qoi` rejects anything shorter than
+        // 14 + 8 = 22 bytes (header + end marker). This is the headline
+        // use case: probe metadata without committing to a full decode.
+        let mut bytes = Vec::with_capacity(HEADER_SIZE);
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&3u32.to_be_bytes()); // width
+        bytes.extend_from_slice(&5u32.to_be_bytes()); // height
+        bytes.push(3); // channels = RGB
+        bytes.push(1); // colorspace = all linear
+        assert_eq!(bytes.len(), HEADER_SIZE);
+        let hdr = decoder::parse_qoi_header(&bytes).expect("14B header probe");
+        assert_eq!(hdr.width, 3);
+        assert_eq!(hdr.height, 5);
+        assert_eq!(hdr.channels, QoiChannels::Rgb);
+        assert_eq!(hdr.colorspace, QoiColorspace::AllLinear);
+
+        // Same bytes rejected by `parse_qoi` because no end marker.
+        assert!(matches!(parse_qoi(&bytes), Err(QoiError::InvalidData(_))));
+    }
+
+    #[test]
+    fn parse_header_rejects_short_input() {
+        // Anything shorter than 14 bytes is rejected up-front — no
+        // partial header parses, no panics on bounds-checked slicing.
+        for n in 0..HEADER_SIZE {
+            let buf = vec![b'q'; n];
+            assert!(
+                matches!(
+                    decoder::parse_qoi_header(&buf),
+                    Err(QoiError::InvalidData(_))
+                ),
+                "len={n} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_header_rejects_bad_magic() {
+        let mut bytes = encode_qoi(2, 1, 4, &[0, 0, 0, 255, 0, 0, 0, 255]);
+        bytes[0] = b'X';
+        assert!(matches!(
+            decoder::parse_qoi_header(&bytes),
+            Err(QoiError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn parse_header_rejects_bad_channels() {
+        let mut bytes = encode_qoi(2, 1, 4, &[0, 0, 0, 255, 0, 0, 0, 255]);
+        bytes[12] = 5;
+        assert!(matches!(
+            decoder::parse_qoi_header(&bytes),
+            Err(QoiError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn parse_header_rejects_bad_colorspace() {
+        let mut bytes = encode_qoi(2, 1, 4, &[0, 0, 0, 255, 0, 0, 0, 255]);
+        bytes[13] = 7;
+        assert!(matches!(
+            decoder::parse_qoi_header(&bytes),
+            Err(QoiError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn parse_header_rejects_zero_dimension() {
+        // Header probe enforces the same zero-dimension reject as the
+        // full decoder so consumers using the probe to pre-size a
+        // buffer never get a `Some((0, 0))` they have to special-case.
+        let mut bytes = Vec::with_capacity(HEADER_SIZE);
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // width = 0
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.push(4);
+        bytes.push(0);
+        assert!(matches!(
+            decoder::parse_qoi_header(&bytes),
+            Err(QoiError::InvalidData(_))
+        ));
+
+        bytes[4..8].copy_from_slice(&1u32.to_be_bytes());
+        bytes[8..12].copy_from_slice(&0u32.to_be_bytes()); // height = 0
+        assert!(matches!(
+            decoder::parse_qoi_header(&bytes),
+            Err(QoiError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn parse_header_does_not_inspect_body_or_end_marker() {
+        // Documented contract: header probe ignores everything past
+        // byte 14. A file with a valid header followed by entirely
+        // garbage body — including a missing/wrong end marker — must
+        // still parse the header successfully. Callers that need the
+        // body's well-formedness call `parse_qoi`.
+        let mut bytes = Vec::with_capacity(HEADER_SIZE + 16);
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&4u32.to_be_bytes());
+        bytes.extend_from_slice(&3u32.to_be_bytes());
+        bytes.push(4);
+        bytes.push(0);
+        // Garbage tail — not a valid chunk stream + end marker.
+        bytes.extend_from_slice(&[0xab; 16]);
+        let hdr = decoder::parse_qoi_header(&bytes).expect("header still parses");
+        assert_eq!(hdr.width, 4);
+        assert_eq!(hdr.height, 3);
+        // `parse_qoi` on the same bytes fails: the trailing 8 bytes
+        // aren't the spec's `00 00 00 00 00 00 00 01` end marker.
+        assert!(parse_qoi(&bytes).is_err());
+    }
+
+    #[test]
+    fn parse_header_qoi_header_is_copy() {
+        // QoiHeader carries only POD fields, so it implements `Copy`.
+        // This lets consumers stash it into per-thread scratch state
+        // (e.g. a thumbnail grid's per-cell metadata cache) without
+        // worrying about move semantics or `Clone`-call overhead. We
+        // assert the trait bound here so a future field addition that
+        // silently breaks `Copy` (e.g. adding a `String`) gets caught
+        // by the build, not by a downstream consumer.
+        fn _is_copy<T: Copy>() {}
+        _is_copy::<QoiHeader>();
+    }
+
+    #[test]
+    fn parse_header_on_reference_fixture_agrees_with_full_decode() {
+        // Round-210 regression: every byte-exact reference fixture
+        // (decoded by `tests/reference_fixtures.rs`) reports the same
+        // header metadata through the probe as through the full decode.
+        // We don't include the fixture bytes here (they live in
+        // `tests/fixtures/`); this asserts the contract on hand-rolled
+        // headers that mirror them.
+        // (i)  edgecase-like:  RGBA, sRGB, tiny dims.
+        // (ii) testcard-like:  RGB,  sRGB, modest dims.
+        // (iii) all-linear:    RGBA, linear, square dims.
+        for (w, h, ch, cs) in [
+            (256u32, 64u32, 4u8, 0u8),
+            (256, 256, 3, 0),
+            (128, 128, 4, 1),
+        ] {
+            let mut bytes = Vec::with_capacity(HEADER_SIZE);
+            bytes.extend_from_slice(MAGIC);
+            bytes.extend_from_slice(&w.to_be_bytes());
+            bytes.extend_from_slice(&h.to_be_bytes());
+            bytes.push(ch);
+            bytes.push(cs);
+            let hdr = decoder::parse_qoi_header(&bytes).expect("synthetic header should parse");
+            assert_eq!(hdr.width, w);
+            assert_eq!(hdr.height, h);
+            assert_eq!(
+                hdr.channels,
+                if ch == 4 {
+                    QoiChannels::Rgba
+                } else {
+                    QoiChannels::Rgb
+                }
+            );
+            assert_eq!(
+                hdr.colorspace,
+                if cs == 1 {
+                    QoiColorspace::AllLinear
+                } else {
+                    QoiColorspace::SrgbWithLinearAlpha
+                }
+            );
+        }
     }
 
     #[test]

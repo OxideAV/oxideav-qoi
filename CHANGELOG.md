@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round-210 depth-mode public-API surface: `parse_qoi_header` plus
+  the supporting `QoiHeader` struct (`width`, `height`, `channels`,
+  `colorspace`, all `Copy`). Cheap header-only probe that validates
+  the 14-byte QOI header (`qoif` magic, channels ∈ {3,4}, colorspace
+  ∈ {0,1}, non-zero dims) and returns the metadata tuple without
+  walking the chunk stream or allocating a pixel buffer. Accepts
+  inputs as short as 14 bytes (`parse_qoi` still requires 14 + 8 =
+  22 to also cover the end marker). Intended for thumbnail-grid
+  metadata probing, output-size estimation before allocating a
+  decode buffer, and per-application size-limit rejection where
+  decoding the full pixel stream would be wasteful.
+
+  Implementation: shared `parse_header_only` helper in
+  `decoder.rs` so the validity tests are a single source of truth —
+  any future spec clarification on header-field validity (e.g. a
+  new colorspace value) lands once and propagates to both
+  `parse_qoi_header` and the prologue of `parse_qoi`. Nine new
+  tests cover field extraction, 14-byte minimum input, short-input
+  rejection, bad magic / channels / colorspace / zero-dimension
+  rejection, body-tail ignored (probe parses a file whose body is
+  garbage as long as the header is well-formed), `QoiHeader: Copy`
+  trait bound, and synthetic-header parity. A
+  `header_probe_agrees_with_full_decode_on_every_fixture` integration
+  test loops over all four reference fixtures + their 14-byte
+  prefixes and asserts the probe's `(width, height, channels,
+  colorspace)` tuple matches the full decode byte-for-byte. Public
+  API is purely additive (existing `parse_qoi` / `encode_qoi` /
+  `encode_qoi_full` signatures unchanged); standalone (no
+  `oxideav-core`) and registry-feature builds both expose the new
+  entry point.
+
 ### Changed
 
 - Round-205 encoder hot-path refactor: replaced the per-chunk

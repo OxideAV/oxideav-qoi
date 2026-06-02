@@ -18,7 +18,7 @@
 //! <https://qoiformat.org/qoi_test_images.zip> (the dataset linked
 //! from the QOI homepage). They are not modified.
 
-use oxideav_qoi::{encode_qoi_full, parse_qoi, QoiChannels, QoiColorspace};
+use oxideav_qoi::{encode_qoi_full, parse_qoi, parse_qoi_header, QoiChannels, QoiColorspace};
 
 fn check_byte_exact_roundtrip(path: &str, fixture: &[u8]) {
     let img = parse_qoi(fixture).unwrap_or_else(|e| panic!("{path}: parse failed: {e:?}"));
@@ -112,5 +112,44 @@ fn pixel_roundtrip_all_fixtures() {
             "{name}: pixel buffer length drift"
         );
         assert_eq!(again.pixels, first.pixels, "{name}: pixel bytes drift");
+    }
+}
+
+/// Round-210 depth-mode: header probe on every reference fixture must
+/// agree byte-for-byte with the full decode's `(width, height,
+/// channels, colorspace)` tuple. If the probe ever disagreed with the
+/// full decode it would be a silent contract break — every consumer
+/// using the probe to pre-size a buffer would mis-allocate. The probe
+/// only inspects 14 bytes, so it's cheap; running it on every fixture
+/// also keeps the test honest if the byte-offset layout of the 14-byte
+/// header ever subtly drifts.
+#[test]
+fn header_probe_agrees_with_full_decode_on_every_fixture() {
+    for (name, bytes) in [
+        ("edgecase.qoi", &include_bytes!("fixtures/edgecase.qoi")[..]),
+        ("qoi_logo.qoi", &include_bytes!("fixtures/qoi_logo.qoi")[..]),
+        ("testcard.qoi", &include_bytes!("fixtures/testcard.qoi")[..]),
+        (
+            "testcard_rgba.qoi",
+            &include_bytes!("fixtures/testcard_rgba.qoi")[..],
+        ),
+    ] {
+        let img = parse_qoi(bytes).unwrap_or_else(|e| panic!("{name}: full decode: {e:?}"));
+        let hdr = parse_qoi_header(bytes).unwrap_or_else(|e| panic!("{name}: header probe: {e:?}"));
+        assert_eq!(hdr.width, img.width, "{name}: width drift");
+        assert_eq!(hdr.height, img.height, "{name}: height drift");
+        assert_eq!(hdr.channels, img.channels, "{name}: channels drift");
+        assert_eq!(hdr.colorspace, img.colorspace, "{name}: colorspace drift");
+
+        // Probe also accepts the bare 14-byte prefix of the fixture.
+        // Cheap defence against a regression that ever made the probe
+        // peek past the header.
+        let prefix = &bytes[..14];
+        let hdr_prefix =
+            parse_qoi_header(prefix).unwrap_or_else(|e| panic!("{name}: 14B prefix probe: {e:?}"));
+        assert_eq!(hdr_prefix.width, hdr.width);
+        assert_eq!(hdr_prefix.height, hdr.height);
+        assert_eq!(hdr_prefix.channels, hdr.channels);
+        assert_eq!(hdr_prefix.colorspace, hdr.colorspace);
     }
 }
