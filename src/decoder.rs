@@ -117,17 +117,63 @@ fn parse_header_only(input: &[u8]) -> Result<QoiHeader> {
 /// * any chunk runs past the end of the stream,
 /// * the trailing 8-byte end marker is missing or wrong.
 pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
+    let mut pixels = Vec::new();
+    let hdr = parse_qoi_into(input, &mut pixels)?;
+    Ok(QoiImage {
+        width: hdr.width,
+        height: hdr.height,
+        channels: hdr.channels,
+        colorspace: hdr.colorspace,
+        pixels,
+        pts: None,
+    })
+}
+
+/// Decode into a caller-owned pixel `Vec<u8>`, reusing its existing
+/// allocation when large enough, and return the parsed
+/// [`QoiHeader`].
+///
+/// Identical decode contract to [`parse_qoi`] — same byte-for-byte
+/// pixel output, same error set — but the decoded pixel buffer is
+/// written into `pixels` (cleared first) instead of allocated fresh
+/// per call. Designed for tight decode-in-a-loop callers — image
+/// pipelines, thumbnail batches, decoder-side benches — that want
+/// to amortise the `width * height * channels` allocation across
+/// many images of similar dimensions. After a few iterations the
+/// buffer has grown to the largest image's pixel size, and every
+/// subsequent decode reuses that capacity without a fresh
+/// allocation. On return, `pixels.len()` is the exact decoded byte
+/// count (`width * height * channels`) and `pixels.capacity()` is
+/// whatever the previous worst case was (kept, not shrunk).
+///
+/// The returned [`QoiHeader`] reports the same `(width, height,
+/// channels, colorspace)` tuple [`parse_qoi`] would have produced
+/// — useful for callers that want to size further downstream
+/// scratch buffers without keeping the full [`QoiImage`] around.
+///
+/// Both `parse_qoi` and `parse_qoi_into` go through this function,
+/// so the decoder hot path is shared in one place. Errors are
+/// reported via the same [`QoiError`] variants documented on
+/// [`parse_qoi`]; on error, the caller's buffer is left in an
+/// unspecified state (it was cleared on entry, then possibly
+/// resized to `width * height * channels` zero bytes before the
+/// failing chunk arm) and callers should not read from it. The
+/// retained `capacity()` is still valid as scratch for the next
+/// call.
+pub fn parse_qoi_into(input: &[u8], pixels: &mut Vec<u8>) -> Result<QoiHeader> {
+    pixels.clear();
     if input.len() < HEADER_SIZE + END_MARKER.len() {
         return Err(Error::invalid(
             "QOI: input shorter than header + end marker",
         ));
     }
+    let hdr = parse_header_only(input)?;
     let QoiHeader {
         width,
         height,
         channels,
-        colorspace,
-    } = parse_header_only(input)?;
+        colorspace: _,
+    } = hdr;
 
     // Guard against width * height * channels overflowing usize on
     // unusual targets (the spec permits up to u32::MAX * u32::MAX,
@@ -158,31 +204,38 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
         return Err(Error::invalid("QOI: missing or invalid end marker"));
     }
 
-    // Pre-allocate the output buffer to its EXACT final size (one
-    // allocation, zero re-grows) and write through a moving cursor.
-    // The capacity reservation can't trust the header's
-    // `width * height * channels` directly — a small (≈30-byte) file
-    // may claim e.g. 65536×65536 (≈1 TB) and `total_bytes_usize` fits
-    // `usize` while vastly exceeding available memory, so a naive
-    // `Vec::with_capacity(total_bytes_usize)` aborts the process. The
-    // chunk stream physically can't decode to more pixels than
-    // `chunks.len() * 62` (one RUN byte emits at most 62 copies; every
-    // other op consumes ≥1 byte per pixel), so when the header's
-    // claimed pixel count exceeds that cap we reject the stream as
-    // truncated up-front rather than over-allocating. Once past the
-    // guard the exact-size `vec![0; bytes_per_pixel * pixel_count]`
-    // gives every write a known in-bounds slot — no per-pixel
-    // `push` bounds checks, no mid-loop reallocation. The RUN arm
-    // copies a 3-or-4-byte template into a contiguous slice in one
-    // `copy_from_slice` per channel layout instead of N per-byte
-    // `Vec::push` calls.
+    // Pre-size the caller's buffer to its EXACT final length (one
+    // length-update, zero re-grows when the existing capacity is
+    // large enough — see reuse contract below) and write through a
+    // moving cursor. The capacity reservation can't trust the
+    // header's `width * height * channels` directly — a small
+    // (≈30-byte) file may claim e.g. 65536×65536 (≈1 TB) and
+    // `total_bytes_usize` fits `usize` while vastly exceeding
+    // available memory, so a naive `resize(total_bytes_usize, 0)`
+    // aborts the process. The chunk stream physically can't decode
+    // to more pixels than `chunks.len() * 62` (one RUN byte emits
+    // at most 62 copies; every other op consumes ≥1 byte per
+    // pixel), so when the header's claimed pixel count exceeds
+    // that cap we reject the stream as truncated up-front rather
+    // than over-allocating. Once past the guard the exact-size
+    // resize gives every write a known in-bounds slot — no
+    // per-pixel `push` bounds checks, no mid-loop reallocation. The
+    // RUN arm copies a 3-or-4-byte template into a contiguous slice
+    // in one `copy_from_slice` per channel layout instead of N
+    // per-byte `Vec::push` calls.
+    //
+    // Reuse contract: when called on a previously-decoded buffer
+    // whose `capacity()` already covers `total_out_bytes`, the
+    // `resize` below is a length-update with no allocator traffic
+    // — that's the headline benefit of `parse_qoi_into` over
+    // `parse_qoi`.
     let max_decodable_pixels = chunks.len().saturating_mul(62);
     if pixel_count_usize > max_decodable_pixels {
         return Err(Error::invalid("QOI: chunk stream truncated mid-image"));
     }
     let bpp = channels as usize;
     let total_out_bytes = pixel_count_usize * bpp;
-    let mut pixels = vec![0u8; total_out_bytes];
+    pixels.resize(total_out_bytes, 0u8);
 
     // Per-spec initial state: previous pixel = RGBA(0,0,0,255), index
     // array zero-filled.
@@ -210,7 +263,7 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
                 prev[2] = chunks[pos + 2];
                 // Alpha unchanged.
                 pos += 3;
-                write_pixel(&mut pixels, out_pos, channels, prev);
+                write_pixel(pixels, out_pos, channels, prev);
                 out_pos += bpp;
                 index[hash(prev) as usize] = prev;
             }
@@ -223,14 +276,14 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
                 prev[2] = chunks[pos + 2];
                 prev[3] = chunks[pos + 3];
                 pos += 4;
-                write_pixel(&mut pixels, out_pos, channels, prev);
+                write_pixel(pixels, out_pos, channels, prev);
                 out_pos += bpp;
                 index[hash(prev) as usize] = prev;
             }
             Chunk::Index => {
                 let idx = (tag & 0x3F) as usize;
                 prev = index[idx];
-                write_pixel(&mut pixels, out_pos, channels, prev);
+                write_pixel(pixels, out_pos, channels, prev);
                 out_pos += bpp;
                 // Index already holds prev — re-storing is a no-op but
                 // keeps the loop body symmetric with the other arms.
@@ -245,7 +298,7 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
                 prev[1] = prev[1].wrapping_add(dg as u8);
                 prev[2] = prev[2].wrapping_add(db as u8);
                 // Alpha unchanged.
-                write_pixel(&mut pixels, out_pos, channels, prev);
+                write_pixel(pixels, out_pos, channels, prev);
                 out_pos += bpp;
                 index[hash(prev) as usize] = prev;
             }
@@ -264,7 +317,7 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
                 prev[1] = prev[1].wrapping_add(dg as u8);
                 prev[2] = prev[2].wrapping_add(db as u8);
                 // Alpha unchanged.
-                write_pixel(&mut pixels, out_pos, channels, prev);
+                write_pixel(pixels, out_pos, channels, prev);
                 out_pos += bpp;
                 index[hash(prev) as usize] = prev;
             }
@@ -300,14 +353,7 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
         ));
     }
 
-    Ok(QoiImage {
-        width,
-        height,
-        channels,
-        colorspace,
-        pixels,
-        pts: None,
-    })
+    Ok(hdr)
 }
 
 // ---------------------------------------------------------------------------

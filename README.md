@@ -31,24 +31,38 @@ files we have access to.
 ## API
 
 ```rust
-use oxideav_qoi::{parse_qoi, parse_qoi_header, encode_qoi, QoiImage, QoiChannels};
+use oxideav_qoi::{
+    parse_qoi, parse_qoi_header, parse_qoi_into,
+    encode_qoi, encode_qoi_into,
+    QoiImage, QoiChannels,
+};
 
 // Cheap header-only probe — no chunk walk, no pixel buffer allocated.
 // Useful for thumbnail-grid metadata + pre-size limit checks.
 let hdr = parse_qoi_header(&qoi_bytes)?;
 println!("{}x{} {:?}", hdr.width, hdr.height, hdr.channels);
 
-// Decode the full file.
+// Decode the full file (allocates a fresh pixel buffer).
 let img: QoiImage = parse_qoi(&qoi_bytes)?;
 assert!(matches!(img.channels, QoiChannels::Rgba | QoiChannels::Rgb));
 
-// Re-encode (round-trip).
+// Re-encode (round-trip; allocates a fresh output buffer).
 let bytes: Vec<u8> = encode_qoi(
     img.width,
     img.height,
     img.channels as u8,           // 3 or 4
     &img.pixels,                  // tightly packed RGB or RGBA
 );
+
+// Buffer-reuse variants for tight encode/decode loops. The output
+// `Vec<u8>` is cleared on entry, written to, and retained for the
+// next call — so a batch converter or image server amortises the
+// worst-case allocation across many images of similar dimensions.
+let mut enc_buf: Vec<u8> = Vec::new();
+let mut dec_buf: Vec<u8> = Vec::new();
+encode_qoi_into(&mut enc_buf, img.width, img.height, 4, &img.pixels);
+let hdr = parse_qoi_into(&enc_buf, &mut dec_buf)?;
+assert_eq!(hdr.width, img.width);
 ```
 
 `QoiImage` carries `width`, `height`, `channels`, `colorspace`, and a
@@ -61,6 +75,20 @@ to size a destination buffer or reject oversized inputs before
 committing to a full decode. The probe inspects only the 14-byte
 header; it accepts inputs as short as 14 bytes and does not walk the
 chunk stream or check the end marker.
+
+The four `_into` entry points — `encode_qoi_into`,
+`encode_qoi_full_into`, `parse_qoi_into` — take a caller-owned
+`&mut Vec<u8>` instead of returning a fresh `Vec`. The buffer is
+cleared on entry, resized to the worst-case (encode) or exact
+(decode) byte count, and truncated to the actual size before
+return; the retained `capacity()` covers the worst case seen so
+far, so a tight encode/decode loop over images of similar size
+allocates once and reuses thereafter. `parse_qoi_into` returns the
+parsed `QoiHeader` so callers can size further downstream scratch
+buffers without keeping the full `QoiImage` around. Same chunk
+priority chain, same error variants, same byte-for-byte output as
+the allocating wrappers — the only visible difference is whether
+the backing allocation is caller-owned.
 
 ## Benchmarks
 
@@ -89,7 +117,19 @@ for the side-by-side; decode column unchanged since r183):
 | RGBA 320×240 alpha-changing       |  3.13 GiB/s |  1.97 GiB/s |  1.19 GiB/s |
 | RGBA 320×240 8-colour INDEX cycle |  2.75 GiB/s |  2.37 GiB/s |  1.26 GiB/s |
 
-Run with `cargo bench -p oxideav-qoi --bench <decode|encode|roundtrip>`.
+A round-225 `reuse` bench A/Bs the new `_into` buffer-reuse
+surface against the allocating wrappers on a tight 256-call inner
+loop over a 64×64 RGBA image. On the Apple-silicon dev box the two
+paths come out at parity within criterion's noise floor (encode
+~1.78 ms / 256 calls = 7 µs/call; decode ~4.70 ms / 256 calls =
+18 µs/call), reflecting that the macOS allocator's small/medium
+block path is essentially free for these sizes. The `_into`
+surface still earns its keep on systems with more expensive
+malloc/free (some embedded targets, debug allocators, tracing
+allocators) and on the rare-but-real workload of millions of
+small QOI thumbnails — neither expressible in this microbench.
+
+Run with `cargo bench -p oxideav-qoi --bench <decode|encode|roundtrip|reuse>`.
 
 ## Profiling
 

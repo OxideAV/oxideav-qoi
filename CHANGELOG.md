@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-225 depth-mode public-API surface: `encode_qoi_into`,
+  `encode_qoi_full_into`, and `parse_qoi_into` — caller-owned
+  `&mut Vec<u8>` variants of the existing allocating wrappers.
+  Buffer is cleared on entry, resized to the worst-case
+  (`14 + n*5 + 8` for encode, `width*height*channels` for decode),
+  written through the same cursor-store hot path, then truncated
+  to the actual produced length before return. The retained
+  `capacity()` covers the largest image seen so far, so tight
+  encode/decode loops over similarly-sized images allocate once
+  and reuse thereafter (image servers, thumbnail batches, encode-
+  loop converters). `parse_qoi_into` returns the parsed
+  `QoiHeader` so callers can size further downstream scratch
+  without keeping the full `QoiImage` around.
+
+  Implementation: both `encode_qoi` / `encode_qoi_full` and
+  `parse_qoi` now delegate to the `_into` variants — the encoder
+  and decoder hot paths are each defined exactly once, so a
+  future bit-exactness change propagates to every entry point in
+  one edit. Same chunk priority chain (RUN > INDEX > DIFF > LUMA
+  > RGB / RGBA on encode), same `QoiError` variants on decode,
+  same byte-for-byte output as the allocating wrappers — the
+  only visible difference is buffer ownership.
+
+  Nine new unit tests cover byte-equivalence against the
+  allocating wrappers (encode + decode), capacity retention
+  across calls (the headline reuse contract), buffer-clear on
+  entry (no stale-byte leaks), end-to-end roundtrip under reuse,
+  and full `QoiError` propagation through the decode `_into`
+  path. A new `benches/reuse.rs` bench A/Bs alloc-per-call
+  against the reuse path on a 64×64 RGBA encode/decode inner
+  loop of 256 calls per criterion iteration. Apple-silicon dev
+  box: both paths come out at parity within criterion's noise
+  floor (encode ~7 µs/call, decode ~18 µs/call), reflecting that
+  the macOS allocator's small/medium-block path is essentially
+  free at these sizes — the surface still earns its keep on
+  systems with more expensive malloc/free and on
+  millions-of-small-thumbnails batch workloads. All 48 unit
+  tests + 8 property-sweep tests + 6 reference-fixture tests +
+  the doctest pass under both `--features registry` and
+  `--no-default-features`.
+
 - Round-210 depth-mode public-API surface: `parse_qoi_header` plus
   the supporting `QoiHeader` struct (`width`, `height`, `channels`,
   `colorspace`, all `Copy`). Cheap header-only probe that validates

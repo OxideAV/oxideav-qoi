@@ -71,6 +71,59 @@ pub fn encode_qoi_full(
     colorspace: u8,
     pixels: &[u8],
 ) -> Vec<u8> {
+    let mut buf = Vec::new();
+    encode_qoi_full_into(&mut buf, width, height, channels, colorspace, pixels);
+    buf
+}
+
+/// Encode into a caller-owned `Vec<u8>`, reusing its existing
+/// allocation when large enough.
+///
+/// Identical to [`encode_qoi`] but writes the encoded bytes into
+/// `buf` (which is cleared first) instead of returning a fresh
+/// `Vec<u8>`. Designed for tight encode-in-a-loop callers — image
+/// servers, batch converters, encoder-side benches — that want to
+/// amortise the worst-case `14 + n*5 + 8` allocation across many
+/// images of similar dimensions. After a few iterations the buffer
+/// has grown to the worst-case capacity of the largest image seen,
+/// and every subsequent encode reuses that capacity without a fresh
+/// allocation. On return, `buf.len()` is the encoded size and
+/// `buf.capacity()` is whatever the previous worst case was (kept,
+/// not shrunk).
+///
+/// `colorspace` defaults to 0 (sRGB with linear alpha) — use
+/// [`encode_qoi_full_into`] to set it explicitly.
+///
+/// # Panics
+///
+/// See [`encode_qoi`].
+pub fn encode_qoi_into(buf: &mut Vec<u8>, width: u32, height: u32, channels: u8, pixels: &[u8]) {
+    encode_qoi_full_into(
+        buf, width, height, channels, /* colorspace */ 0, pixels,
+    );
+}
+
+/// Encode into a caller-owned `Vec<u8>` with an explicit
+/// `colorspace` header byte.
+///
+/// Like [`encode_qoi_into`] but exposes the `colorspace` field. The
+/// buffer is cleared on entry and grown to the worst-case
+/// `14 + width*height*5 + 8` upper bound, then truncated to the
+/// actual encoded size before return — so the existing capacity is
+/// preserved across repeated calls and only re-grown when a larger
+/// image arrives.
+///
+/// # Panics
+///
+/// See [`encode_qoi`].
+pub fn encode_qoi_full_into(
+    buf: &mut Vec<u8>,
+    width: u32,
+    height: u32,
+    channels: u8,
+    colorspace: u8,
+    pixels: &[u8],
+) {
     assert!(
         channels == 3 || channels == 4,
         "QOI: channels must be 3 or 4, got {channels}"
@@ -96,27 +149,32 @@ pub fn encode_qoi_full(
         QoiChannels::Rgb
     };
 
-    // Pre-allocate the output buffer to its EXACT worst-case upper
-    // bound — header (14) + 5 bytes per pixel (the QOI_OP_RGBA
-    // chunk, the widest chunk in the spec) + 8-byte end marker —
-    // and write through a moving byte cursor `out_pos` into the
-    // backing slice. The hot-path emit sites then become plain
-    // indexed stores instead of `Vec::push` / `extend_from_slice`
-    // calls; the per-call capacity check + length update the
-    // optimiser cannot prove unnecessary on `Vec` goes away. The
-    // backing buffer is truncated to `out_pos` before return, so
-    // callers see a `Vec<u8>` of the same logical length as before
-    // — the only visible change is performance. This mirrors the
-    // round-183 decoder refactor that replaced per-pixel
-    // `Vec::push` writes with `&mut [u8]` cursor stores.
+    // Pre-size the caller-provided buffer to its EXACT worst-case
+    // upper bound — header (14) + 5 bytes per pixel (the
+    // QOI_OP_RGBA chunk, the widest chunk in the spec) + 8-byte end
+    // marker — and write through a moving byte cursor `out_pos`.
+    // The hot-path emit sites then become plain indexed stores
+    // instead of `Vec::push` / `extend_from_slice` calls; the
+    // per-call capacity check + length update the optimiser cannot
+    // prove unnecessary on `Vec` goes away. The buffer is truncated
+    // to `out_pos` before return, so callers see a `Vec<u8>` whose
+    // `len()` reflects the actual encoded size while its
+    // `capacity()` retains the worst-case headroom for the next
+    // call (the headline benefit of the `_into` variant).
     //
     // Worst case is realised by `encode_alpha_changing_rgba` (every
     // pixel becomes a 5-byte RGBA chunk); on the solid-fill / index
     // / DIFF paths the over-allocation never materialises because
     // the buffer is truncated to the actual `out_pos` at return.
+    //
+    // Reuse contract: when called on a previously-encoded buffer
+    // whose `capacity()` already covers `cap`, the `resize` below
+    // is a length-update with no allocator traffic — that's the
+    // headline benefit of the `_into` variant over `encode_qoi`.
     let pixel_count = (width as usize) * (height as usize);
     let cap = 14 + pixel_count * 5 + END_MARKER.len();
-    let mut buf = vec![0u8; cap];
+    buf.clear();
+    buf.resize(cap, 0u8);
 
     // Header — exactly 14 bytes into the head of the buffer. One
     // `copy_from_slice` per field avoids the `extend_from_slice`
@@ -232,11 +290,11 @@ pub fn encode_qoi_full(
     buf[out_pos..out_pos + END_MARKER.len()].copy_from_slice(END_MARKER);
     out_pos += END_MARKER.len();
 
-    // Truncate the worst-case allocation down to the actual produced
-    // length so callers see the same `Vec<u8>` shape as before. This
-    // is `Vec::truncate` (no reallocation, just lowers `len`).
+    // Truncate down to the actual produced length so callers see a
+    // `Vec<u8>` whose `len()` is the encoded size. The retained
+    // `capacity()` is the prior worst case, so a subsequent call on
+    // a similar image reuses the same allocation.
     buf.truncate(out_pos);
-    buf
 }
 
 // ---------------------------------------------------------------------------

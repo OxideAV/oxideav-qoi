@@ -55,6 +55,16 @@ harness = false
 name = "roundtrip"
 harness = false
 
+# Round 225 (depth-mode reuse-API): A/B the new buffer-reuse
+# `_into` variants against the allocating `encode_qoi` /
+# `parse_qoi` wrappers on a tight 256-call inner loop over a
+# small (4×4 RGBA) image — the exact workload that motivated the
+# `_into` surface (image servers, thumbnail batches, encode-loop
+# converters).
+[[bench]]
+name = "reuse"
+harness = false
+
 # Round 175 (depth-mode profiling): flat measure-this-thing driver
 # for `samply` / `cargo flamegraph` / `perf record`. Mirrors the
 # `benches/*.rs` scenarios byte-for-byte so a profile capture

@@ -100,8 +100,8 @@ pub const OP_LUMA: u8 = 0x80;
 /// 2-bit chunk tag prefix for `QOI_OP_RUN` (`11xxxxxx`).
 pub const OP_RUN: u8 = 0xC0;
 
-pub use decoder::{parse_qoi, parse_qoi_header};
-pub use encoder::{encode_qoi, encode_qoi_full};
+pub use decoder::{parse_qoi, parse_qoi_header, parse_qoi_into};
+pub use encoder::{encode_qoi, encode_qoi_full, encode_qoi_full_into, encode_qoi_into};
 pub use error::{QoiError, Result};
 pub use image::{QoiChannels, QoiColorspace, QoiHeader, QoiImage};
 
@@ -741,5 +741,221 @@ mod tests {
         let back = parse_qoi(&bytes).unwrap();
         assert_eq!(back.colorspace, QoiColorspace::AllLinear);
         assert_eq!(back.pixels, pixels);
+    }
+
+    // -----------------------------------------------------------------
+    // Round-225 depth-mode: caller-owned-buffer `_into` API surface.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn encode_qoi_into_matches_encode_qoi_byte_for_byte() {
+        // The `_into` variant must produce identical bytes to the
+        // allocating wrapper — same chunk priority chain, same end
+        // marker, same header. The only difference is whether the
+        // backing allocation was caller-owned or fresh.
+        let pixels = rgba_checker(16, 12);
+        let owned = encode_qoi(16, 12, 4, &pixels);
+        let mut buf = Vec::new();
+        encode_qoi_into(&mut buf, 16, 12, 4, &pixels);
+        assert_eq!(owned, buf);
+    }
+
+    #[test]
+    fn encode_qoi_full_into_matches_encode_qoi_full_byte_for_byte() {
+        // Same byte-equivalence contract for the colorspace-explicit
+        // variant. The all-linear (`colorspace=1`) header byte must
+        // propagate through the `_into` path unchanged.
+        let pixels = vec![10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 100];
+        let owned = encode_qoi_full(3, 1, 4, /* colorspace */ 1, &pixels);
+        let mut buf = Vec::new();
+        encode_qoi_full_into(&mut buf, 3, 1, 4, /* colorspace */ 1, &pixels);
+        assert_eq!(owned, buf);
+        assert_eq!(buf[13], 1);
+    }
+
+    #[test]
+    fn encode_qoi_into_reuses_buffer_across_calls() {
+        // The headline benefit of `_into`: a buffer whose capacity
+        // already covers the worst-case bound for the next image
+        // doesn't trigger a fresh allocation. We can't observe
+        // "did the allocator run" directly, but we can observe the
+        // contract: after a large encode, capacity sticks; after a
+        // small encode using the same buffer, capacity is still at
+        // least the prior worst case, and the encoded bytes match
+        // the fresh-allocation encoder.
+        let big_pixels = rgba_checker(32, 32);
+        let small_pixels = rgba_checker(4, 4);
+
+        let mut buf = Vec::new();
+        encode_qoi_into(&mut buf, 32, 32, 4, &big_pixels);
+        let big_cap = buf.capacity();
+        let big_bytes = buf.clone();
+
+        // Now encode a smaller image into the same buffer. The
+        // capacity must be at least the prior `big_cap` (i.e. the
+        // allocation is retained, not shrunk) and the output must
+        // match a fresh-allocation encode of the small input.
+        encode_qoi_into(&mut buf, 4, 4, 4, &small_pixels);
+        assert!(
+            buf.capacity() >= big_cap,
+            "encode_qoi_into shrank capacity from {big_cap} to {} between \
+             calls — defeats the buffer-reuse contract",
+            buf.capacity()
+        );
+        let small_owned = encode_qoi(4, 4, 4, &small_pixels);
+        assert_eq!(buf, small_owned);
+
+        // And the big encode is unaffected by the reuse path.
+        let big_owned = encode_qoi(32, 32, 4, &big_pixels);
+        assert_eq!(big_bytes, big_owned);
+    }
+
+    #[test]
+    fn encode_qoi_into_clears_existing_contents() {
+        // A pre-populated buffer must be cleared before the new
+        // encode is written — otherwise stale bytes between the
+        // (former) end marker and the new output would surface as
+        // garbage prefixed to the new image.
+        let mut buf = vec![0xAB; 1000];
+        let pixels = rgba_checker(4, 4);
+        encode_qoi_into(&mut buf, 4, 4, 4, &pixels);
+        // First four bytes are the QOI magic, not the leftover 0xAB.
+        assert_eq!(&buf[0..4], MAGIC);
+        // Last 8 bytes are the spec end marker.
+        assert_eq!(&buf[buf.len() - 8..], END_MARKER);
+        // Round-trip recovers the input pixels.
+        let back = parse_qoi(&buf).unwrap();
+        assert_eq!(back.pixels, pixels);
+    }
+
+    #[test]
+    fn parse_qoi_into_matches_parse_qoi_byte_for_byte() {
+        // Same pixel bytes, same header metadata. The only
+        // difference is that the `_into` path returns the header
+        // separately and writes pixels into a caller-owned `Vec`.
+        let pixels = rgba_checker(16, 12);
+        let bytes = encode_qoi(16, 12, 4, &pixels);
+
+        let owned = parse_qoi(&bytes).expect("decode");
+        let mut pix_buf = Vec::new();
+        let hdr = parse_qoi_into(&bytes, &mut pix_buf).expect("decode into");
+
+        assert_eq!(hdr.width, owned.width);
+        assert_eq!(hdr.height, owned.height);
+        assert_eq!(hdr.channels, owned.channels);
+        assert_eq!(hdr.colorspace, owned.colorspace);
+        assert_eq!(pix_buf, owned.pixels);
+    }
+
+    #[test]
+    fn parse_qoi_into_reuses_buffer_across_calls() {
+        // Decode-side counterpart of the encoder reuse test. After
+        // decoding a 32×32 image, the pixel-buffer capacity must
+        // stick across a subsequent decode of a 4×4 image — so the
+        // allocator is touched once for the largest image seen, not
+        // once per call.
+        let big_pixels = rgba_checker(32, 32);
+        let small_pixels = rgba_checker(4, 4);
+        let big_bytes = encode_qoi(32, 32, 4, &big_pixels);
+        let small_bytes = encode_qoi(4, 4, 4, &small_pixels);
+
+        let mut pix_buf = Vec::new();
+        let _ = parse_qoi_into(&big_bytes, &mut pix_buf).expect("big decode");
+        let big_cap = pix_buf.capacity();
+        assert_eq!(pix_buf, big_pixels);
+
+        let hdr = parse_qoi_into(&small_bytes, &mut pix_buf).expect("small decode");
+        assert!(
+            pix_buf.capacity() >= big_cap,
+            "parse_qoi_into shrank capacity from {big_cap} to {} between \
+             calls — defeats the buffer-reuse contract",
+            pix_buf.capacity()
+        );
+        assert_eq!(hdr.width, 4);
+        assert_eq!(hdr.height, 4);
+        assert_eq!(hdr.channels, QoiChannels::Rgba);
+        assert_eq!(pix_buf, small_pixels);
+    }
+
+    #[test]
+    fn parse_qoi_into_clears_existing_contents() {
+        // A pre-populated pixel buffer must be cleared on entry —
+        // otherwise stale bytes past the new image's
+        // `width * height * channels` would surface to callers that
+        // compute their own row strides off `pix_buf.len()` rather
+        // than `width * channels`.
+        let mut pix_buf = vec![0xAB; 8192];
+        let pixels = rgba_checker(8, 6);
+        let bytes = encode_qoi(8, 6, 4, &pixels);
+        let hdr = parse_qoi_into(&bytes, &mut pix_buf).expect("decode");
+        assert_eq!(hdr.width, 8);
+        assert_eq!(hdr.height, 6);
+        // Length is exactly `width * height * channels` — no
+        // trailing 0xAB bytes from the prior allocation.
+        assert_eq!(pix_buf.len(), 8 * 6 * 4);
+        assert_eq!(pix_buf, pixels);
+    }
+
+    #[test]
+    fn parse_qoi_into_propagates_decoder_errors() {
+        // Every error path the standard `parse_qoi` reports must
+        // also surface through `parse_qoi_into` — same `QoiError`
+        // variants, same message shape.
+        let mut pix_buf = Vec::new();
+        // Bad magic.
+        let mut bytes = encode_qoi(2, 1, 4, &[0, 0, 0, 255, 0, 0, 0, 255]);
+        bytes[0] = b'X';
+        assert!(matches!(
+            parse_qoi_into(&bytes, &mut pix_buf),
+            Err(QoiError::InvalidData(_))
+        ));
+        // Truncated input (shorter than header + end marker).
+        let short = vec![b'q', b'o', b'i', b'f'];
+        assert!(matches!(
+            parse_qoi_into(&short, &mut pix_buf),
+            Err(QoiError::InvalidData(_))
+        ));
+        // Missing end marker.
+        let bytes = encode_qoi(2, 1, 4, &[0, 0, 0, 255, 0, 0, 0, 255]);
+        let truncated = &bytes[..bytes.len() - 8];
+        assert!(matches!(
+            parse_qoi_into(truncated, &mut pix_buf),
+            Err(QoiError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn into_apis_roundtrip_under_buffer_reuse() {
+        // End-to-end: encode into a reusable buffer, decode into
+        // another reusable buffer, both reused across two distinct
+        // images. The round-trip contract — same pixel bytes out as
+        // in — must hold per-image regardless of what the buffers
+        // happened to contain from prior calls.
+        let img_a = rgba_checker(7, 5);
+        let img_b = rgba_checker(13, 9);
+
+        let mut enc_buf = Vec::new();
+        let mut dec_buf = Vec::new();
+
+        encode_qoi_into(&mut enc_buf, 7, 5, 4, &img_a);
+        let hdr = parse_qoi_into(&enc_buf, &mut dec_buf).expect("decode A");
+        assert_eq!(hdr.width, 7);
+        assert_eq!(hdr.height, 5);
+        assert_eq!(dec_buf, img_a);
+
+        encode_qoi_into(&mut enc_buf, 13, 9, 4, &img_b);
+        let hdr = parse_qoi_into(&enc_buf, &mut dec_buf).expect("decode B");
+        assert_eq!(hdr.width, 13);
+        assert_eq!(hdr.height, 9);
+        assert_eq!(dec_buf, img_b);
+
+        // And a third image smaller than the second: dec_buf shrinks
+        // by `len`, not by `capacity`, so the buffer retains the
+        // worst-case allocation seen so far.
+        let img_c = rgba_checker(4, 4);
+        encode_qoi_into(&mut enc_buf, 4, 4, 4, &img_c);
+        let _ = parse_qoi_into(&enc_buf, &mut dec_buf).expect("decode C");
+        assert_eq!(dec_buf.len(), 4 * 4 * 4);
+        assert_eq!(dec_buf, img_c);
     }
 }
