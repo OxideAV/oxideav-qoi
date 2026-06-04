@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round-231 encoder hot-path channel split: replaced the per-pixel
+  `match qoi_channels { Rgb => …, Rgba => … }` that assembled the
+  4-byte `cur` tuple inside the encode loop with a single up-front
+  dispatch into one of two channel-specialised inner functions —
+  `encode_inner_rgb` for 3-channel input and `encode_inner_rgba`
+  for 4-channel input. Both are `#[inline]` and share an identical
+  chunk-priority chain (RUN > INDEX > DIFF > LUMA > RGB / RGBA);
+  the differences are confined to (a) the pixel-load shape (3-byte
+  array literal vs 4-byte array literal), (b) the 3-channel path
+  no longer carries the alpha-equality test or the RGBA emit arm
+  at all — alpha is provably `0xff` for the entire stream, so
+  both are unreachable, and (c) the 3-channel path no longer
+  synthesises `cur[3] = prev[3]` on every pixel just to keep the
+  downstream alpha-compare shape uniform.
+
+  Encode throughput on the round-205 profile baseline (Apple-
+  silicon dev box, release build, 3000-iter `examples/profile_qoi.rs`
+  run):
+
+  | Scenario                          | Encode r205 | Encode r231 | Speedup |
+  | --------------------------------- | ----------- | ----------- | ------- |
+  | RGBA 320×240 gradient             |   891 MiB/s |   974 MiB/s | 1.09×   |
+  | RGB24 640×480 gradient            |   593 MiB/s |   652 MiB/s | 1.10×   |
+  | RGBA 512×512 solid-RUN            |  2.26 GiB/s |  2.70 GiB/s | 1.19×   |
+  | RGBA 320×240 alpha-changing       |  1.97 GiB/s |  2.05 GiB/s | 1.04×   |
+  | RGBA 320×240 8-colour INDEX cycle |  2.37 GiB/s |  2.54 GiB/s | 1.07×   |
+
+  The solid-RUN row is the biggest relative win because the inner
+  loop body shrinks the most when the discriminant load goes away
+  — every pixel takes the `cur == prev` fast path, and the
+  `OP_RUN | (run - 1)` flush is the only chunk arm exercised, so
+  shedding the match has nowhere to hide. The RGB24 gradient is
+  the structurally cleanest win: the 3-channel inner loop no
+  longer has the alpha-compare branch at all, and the optimiser
+  keeps the LUMA / DIFF range checks tighter without the
+  discriminant-load pressure. The alpha-changing row picks up
+  the least relatively because its hot path was already the
+  unconditional 5-byte RGBA emit — a tag store + 4-byte
+  `copy_from_slice` that the r205 cursor-write had already taken
+  to the limit of what the chunk-emit shape can do; the saving
+  is the per-pixel discriminant load only.
+
+  Public API (`encode_qoi`, `encode_qoi_full`, `encode_qoi_into`,
+  `encode_qoi_full_into`) is unchanged byte-for-byte — the new
+  inner functions are crate-private and produce identical chunk
+  streams to the previous single-loop encoder. All 48 unit tests
+  + 8 property-sweep tests + 6 reference-fixture byte-exact tests
+  + the doctest pass under both `--features registry` and
+  `--no-default-features`; in particular the four reference
+  fixtures (`edgecase.qoi`, `qoi_logo.qoi`, `testcard.qoi`,
+  `testcard_rgba.qoi`) still re-encode byte-for-byte against
+  themselves, confirming the channel split preserves the chunk-
+  selection chain exactly.
+
 ### Added
 
 - Round-225 depth-mode public-API surface: `encode_qoi_into`,

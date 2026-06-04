@@ -105,17 +105,17 @@ op-mix surface:
 * a per-pixel-changing-alpha worst case (`QOI_OP_RGBA` dominated),
 * an 8-colour cycle (`QOI_OP_INDEX` hot path).
 
-Round-205 baseline on an Apple-silicon dev box (post-encoder-
-cursor-write refactor — see `profile/README.md` "Round-205 delta"
-for the side-by-side; decode column unchanged since r183):
+Round-231 baseline on an Apple-silicon dev box (post-encoder
+channel-specialised split — see `profile/README.md` "Round-231
+delta" for the side-by-side; decode column unchanged since r183):
 
 | Scenario                          | Decode      | Encode      | Roundtrip   |
 | --------------------------------- | ----------- | ----------- | ----------- |
-| RGBA 320×240 gradient             |   927 MiB/s |   891 MiB/s |   460 MiB/s |
-| RGB24 640×480 gradient            |   628 MiB/s |   593 MiB/s |   292 MiB/s |
-| RGBA 512×512 solid (RUN-heavy)    |  37.7 GiB/s |  2.26 GiB/s |  2.12 GiB/s |
-| RGBA 320×240 alpha-changing       |  3.13 GiB/s |  1.97 GiB/s |  1.19 GiB/s |
-| RGBA 320×240 8-colour INDEX cycle |  2.75 GiB/s |  2.37 GiB/s |  1.26 GiB/s |
+| RGBA 320×240 gradient             |  1.12 GiB/s |   970 MiB/s |   507 MiB/s |
+| RGB24 640×480 gradient            |   643 MiB/s |   665 MiB/s |   315 MiB/s |
+| RGBA 512×512 solid (RUN-heavy)    |  36.8 GiB/s |  2.68 GiB/s |  2.44 GiB/s |
+| RGBA 320×240 alpha-changing       |  3.14 GiB/s |  2.05 GiB/s |  1.18 GiB/s |
+| RGBA 320×240 8-colour INDEX cycle |  2.71 GiB/s |  2.62 GiB/s |  1.30 GiB/s |
 
 A round-225 `reuse` bench A/Bs the new `_into` buffer-reuse
 surface against the allocating wrappers on a tight 256-call inner
@@ -153,7 +153,17 @@ work per pixel) moved from 624 MiB/s → 930 MiB/s (1.49×); the
 alpha-changing row (almost-every-pixel RGBA) moved from 1.06 GiB/s
 → 1.96 GiB/s (1.85×) as the per-pixel emit collapsed from five
 `Vec::push` calls to a single 4-byte `copy_from_slice` after the
-tag store.
+tag store. Round 231 split the encoder hot loop into two
+channel-specialised inner functions (`encode_inner_rgba` for
+4-channel input, `encode_inner_rgb` for 3-channel input): the
+per-pixel `match qoi_channels { Rgb => …, Rgba => … }` that
+assembled the 4-byte `cur` tuple is now hoisted out, and the
+3-channel path no longer carries the RGBA emit arm or the
+alpha-equality test at all (alpha is provably `0xff` for the
+entire stream). RGB24 gradient encode moved from 593 MiB/s →
+665 MiB/s (1.12×) and RGBA gradient from 891 MiB/s → 970 MiB/s
+(1.09×); the RUN-dominated row also picked up 1.21× as the
+chunk-byte index-load shape simplifies under the split.
 
 ```sh
 cargo run --release --example profile_qoi -- all

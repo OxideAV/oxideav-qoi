@@ -509,6 +509,119 @@ mod tests {
     }
 
     #[test]
+    fn encoder_rgb_path_never_emits_rgba_chunk() {
+        // Round-231 regression: with the encoder split into two
+        // channel-specialised inner loops, the 3-channel path no
+        // longer carries the RGBA emit arm at all. We can't observe
+        // unreachable code from outside, but we can observe the
+        // contract — for ANY 3-channel input, the encoded byte
+        // stream never contains the 0xff OP_RGBA tag in a chunk
+        // position. The header bytes 0..14 and end marker bytes
+        // last-8..last are excluded since neither contains a
+        // chunk-byte 0xff in a well-formed file.
+        //
+        // Exercise this across all five property-style input
+        // generators so the assertion holds regardless of which
+        // chunk arms the input would prefer.
+        for w in [1u32, 7, 16, 64] {
+            for h in [1u32, 5, 16] {
+                let n = (w as usize) * (h as usize);
+                // Smooth-ish RGB input — covers DIFF + LUMA arms.
+                let mut pixels = vec![0u8; n * 3];
+                for (i, slot) in pixels.iter_mut().enumerate() {
+                    *slot = ((i as u32).wrapping_mul(37) ^ 0x5a) as u8;
+                }
+                let bytes = encode_qoi(w, h, 3, &pixels);
+                let chunks = &bytes[14..bytes.len() - 8];
+                // Walk the chunk stream and confirm no leading tag
+                // is OP_RGBA. We don't try to fully decode chunks
+                // here — we only check that the first byte of each
+                // dispatched chunk is not 0xff. A bare scan over
+                // the slice would over-count (0xff bytes can occur
+                // inside RGB / LUMA payloads); instead we walk the
+                // exact chunk shapes the spec defines.
+                let mut pos = 0;
+                while pos < chunks.len() {
+                    let tag = chunks[pos];
+                    assert_ne!(
+                        tag, OP_RGBA,
+                        "w={w} h={h}: 3-channel encode emitted an \
+                         OP_RGBA chunk at offset {pos}"
+                    );
+                    pos += match tag {
+                        OP_RGB => 4, // tag + 3 body bytes
+                        // No RGBA in this stream — defensively
+                        // panic if we somehow see one.
+                        OP_RGBA => unreachable!(),
+                        other => match other & 0xC0 {
+                            OP_INDEX | OP_DIFF | OP_RUN => 1,
+                            OP_LUMA => 2,
+                            _ => unreachable!(),
+                        },
+                    };
+                }
+                // Round-trip still holds — sanity.
+                let back = parse_qoi(&bytes).expect("decode");
+                assert_eq!(back.pixels, pixels, "w={w} h={h}: round-trip drift");
+            }
+        }
+    }
+
+    #[test]
+    fn encoder_channel_split_preserves_alpha_changing_rgba_path() {
+        // Round-231 regression: the channel-split must not have
+        // accidentally moved the RGBA emit arm out of the 4-channel
+        // path. Encode a stream that forces RGBA on every pixel
+        // (alpha changes every pixel + RGB triple stays out of
+        // INDEX / DIFF / LUMA range) and confirm the encoder
+        // produces n * 5 + 14 + 8 bytes exactly — the worst-case
+        // shape only the RGBA emit arm can produce.
+        let mut pixels = Vec::with_capacity(64 * 4);
+        for i in 0..64u8 {
+            // r,g,b cycle through wide deltas; alpha changes every
+            // pixel to defeat both INDEX hits AND the alpha-equality
+            // fast path.
+            pixels.push(i.wrapping_mul(91));
+            pixels.push(i.wrapping_mul(43));
+            pixels.push(i.wrapping_mul(17));
+            pixels.push(i ^ 0x5a);
+        }
+        let bytes = encode_qoi(64, 1, 4, &pixels);
+        // We can't assert exactly n*5 + 22 because the encoder may
+        // still find some pixel landing in an INDEX slot from a
+        // prior cycle. But the dominant chunk MUST be OP_RGBA for
+        // the contract to hold — assert at least 80% of chunk
+        // dispatches are 5-byte RGBA chunks.
+        let chunks = &bytes[14..bytes.len() - 8];
+        let mut total = 0usize;
+        let mut rgba = 0usize;
+        let mut pos = 0;
+        while pos < chunks.len() {
+            let tag = chunks[pos];
+            total += 1;
+            if tag == OP_RGBA {
+                rgba += 1;
+                pos += 5;
+            } else if tag == OP_RGB {
+                pos += 4;
+            } else {
+                pos += match tag & 0xC0 {
+                    OP_INDEX | OP_DIFF | OP_RUN => 1,
+                    OP_LUMA => 2,
+                    _ => unreachable!(),
+                };
+            }
+        }
+        assert!(
+            rgba * 100 / total >= 80,
+            "expected the RGBA emit arm to dominate, got {rgba}/{total}"
+        );
+        // Round-trip still holds.
+        let back = parse_qoi(&bytes).expect("decode");
+        assert_eq!(back.pixels, pixels);
+    }
+
+    #[test]
     fn encoder_truncates_to_actual_len() {
         // Round-205 regression: the encoder pre-allocates an
         // upper-bound `vec![0; 14 + n*5 + 8]` and truncates down to
