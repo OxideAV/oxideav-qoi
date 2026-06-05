@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round-237 stream-level QOI chunk iterator: new `ops` module with
+  a typed `QoiOp` enum (`Rgb`, `Rgba`, `Index`, `Diff`, `Luma`,
+  `Run`, `Truncated`), a `QoiOpIter<'a>` `Iterator` impl, and two
+  constructors — `iter_ops(&[u8]) -> Result<(QoiHeader,
+  QoiOpIter<'_>)>` and `iter_ops_strict(&[u8]) -> Result<(QoiHeader,
+  Vec<QoiOp>)>`. Walks the post-header chunk stream once linearly
+  and yields one `QoiOp` per chunk *without* materialising a pixel
+  buffer or running the running-pixel-array / `prev`-pixel state.
+  Delta fields on `Diff` / `Luma` carry the un-biased signed values
+  the spec defines (`-2..=+1` for `Diff`, `-32..=+31` for `Luma.dg`,
+  `-8..=+7` for `Luma.{dr_dg, db_dg}`); `Run.length` carries the
+  post-debias `1..=62` value; `Index.index` carries the raw 6-bit
+  field. Both constructors run the same 14-byte header validation
+  the full decoder does (magic, channels ∈ {3, 4}, colorspace ∈
+  {0, 1}, non-zero dimensions, 8-byte end-marker present). The
+  iterator surfaces mid-chunk truncation as a final
+  `QoiOp::Truncated { tag, missing_body_bytes }`; the strict
+  variant elevates the same condition to an `Err(InvalidData)`.
+  Intended for chunk-shape histograms (compression diagnostics),
+  debug pretty-printers / dumpers, and future encoder-priority-
+  chain regression checks. Module-level docs spell out the
+  "stateless w.r.t. decoded image" contract.
+
 ### Changed
 
 - Round-231 encoder hot-path channel split: replaced the per-pixel

@@ -34,6 +34,7 @@ files we have access to.
 use oxideav_qoi::{
     parse_qoi, parse_qoi_header, parse_qoi_into,
     encode_qoi, encode_qoi_into,
+    iter_ops, iter_ops_strict, QoiOp,
     QoiImage, QoiChannels,
 };
 
@@ -75,6 +76,19 @@ to size a destination buffer or reject oversized inputs before
 committing to a full decode. The probe inspects only the 14-byte
 header; it accepts inputs as short as 14 bytes and does not walk the
 chunk stream or check the end marker.
+
+The `iter_ops` / `iter_ops_strict` entry points (round 237) walk the
+post-header chunk stream and yield one typed `QoiOp` per chunk —
+`Rgb { r, g, b }`, `Rgba { r, g, b, a }`, `Index { index }`,
+`Diff { dr, dg, db }`, `Luma { dg, dr_dg, db_dg }`, `Run { length }` —
+*without* materialising a pixel buffer. The iterator is stateless with
+respect to the running pixel array and `prev` pixel; delta fields are
+the un-biased signed values the decoder would apply. Useful for chunk-
+shape histograms (compression diagnostics), debug pretty-printers, and
+encoder-priority-chain regression checks. `iter_ops_strict` collects
+into a `Vec<QoiOp>` and surfaces mid-chunk truncation as an
+`Err(InvalidData)`; the non-strict variant yields a final
+`QoiOp::Truncated { tag, missing_body_bytes }` and stops.
 
 The four `_into` entry points — `encode_qoi_into`,
 `encode_qoi_full_into`, `parse_qoi_into` — take a caller-owned
