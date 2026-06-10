@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/OxideAV/oxideav-qoi/compare/v0.1.2...v0.1.3) - 2026-06-10
+
+### Other
+
+- r267 typed-primitive surface — qoi_hash + QoiOp introspection
+- drop release-plz.toml — use release-plz defaults across the workspace
+- stream-level QoiOp chunk iterator (r237)
+- channel-specialised inner loops (r231)
+- caller-owned-buffer _into variants for encode + decode (r225)
+- add parse_qoi_header cheap header probe + QoiHeader (r210)
+- exact-size buffer + cursor-write hot path (r205)
+- property-style sweep across QOI encode/decode invariants (r199)
+
 ### Added
 
 - Round-267 typed-primitive surface on the `ops` module:
