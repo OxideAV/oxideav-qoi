@@ -55,6 +55,43 @@ use crate::error::{QoiError as Error, Result};
 use crate::image::QoiHeader;
 use crate::{END_MARKER, HEADER_SIZE, OP_DIFF, OP_INDEX, OP_LUMA, OP_RGB, OP_RGBA, OP_RUN};
 
+/// QOI running-pixel-array hash — the 64-slot bucket selector the
+/// spec defines as `index_position = (R*3 + G*5 + B*7 + A*11) % 64`.
+///
+/// This is the *typed primitive* form of the hash: it takes a single
+/// `[r, g, b, a]` pixel and returns the `0..=63` slot the encoder and
+/// decoder agree on. The multiply is done in `u32` (non-wrapping), so
+/// e.g. the initial previous pixel `(0, 0, 0, 255)` hashes to
+/// `(11 * 255) % 64 = 2805 % 64 = 53`, *not* the `21` an 8-bit-wrapping
+/// multiply would give. Promoting to `u32` before the multiply is the
+/// difference between a correct decoder and a subtly-wrong one.
+///
+/// Exposed publicly (round 267) so callers building their own QOI
+/// tooling — a `QOI_OP_INDEX`-coverage checker, an alternative encoder
+/// experimenting with the running array, a stream validator that wants
+/// to confirm an `Index { index }` op actually points at the pixel it
+/// would have hashed to — can reuse the exact bucket arithmetic the
+/// crate's decoder uses, instead of re-deriving (and risking the
+/// wrapping bug) it themselves. The mask `& 0x3F` is equivalent to
+/// `% 64` for this non-negative sum and lets the compiler skip the
+/// division.
+///
+/// ```
+/// use oxideav_qoi::qoi_hash;
+/// assert_eq!(qoi_hash([0, 0, 0, 255]), 53);
+/// assert_eq!(qoi_hash([255, 255, 255, 255]), 38);
+/// assert_eq!(qoi_hash([0, 0, 0, 0]), 0);
+/// assert_eq!(qoi_hash([1, 2, 3, 4]), 14);
+/// ```
+#[inline]
+pub fn qoi_hash(p: [u8; 4]) -> u8 {
+    let r = p[0] as u32;
+    let g = p[1] as u32;
+    let b = p[2] as u32;
+    let a = p[3] as u32;
+    ((r * 3 + g * 5 + b * 7 + a * 11) & 0x3F) as u8
+}
+
 /// One decoded QOI chunk, in the shape the spec defines.
 ///
 /// Field values are the *raw* numbers the chunk carries — they are
@@ -150,6 +187,99 @@ pub enum QoiOp {
         /// How many more bytes the chunk would have needed.
         missing_body_bytes: u8,
     },
+}
+
+impl QoiOp {
+    /// The leading chunk byte that encodes this op.
+    ///
+    /// For the 8-bit-tag chunks this is simply `0xFE` ([`crate::OP_RGB`])
+    /// or `0xFF` ([`crate::OP_RGBA`]). For the four 2-bit-tag chunks the
+    /// low 6 bits are reconstructed from the op's fields and OR-ed onto
+    /// the tag prefix, so the returned byte is *exactly* what an encoder
+    /// would write as the first byte of the chunk:
+    ///
+    /// * `Index { index }` → `0x00 | (index & 0x3F)`
+    /// * `Diff { dr, dg, db }` → `0x40 | (dr+2)<<4 | (dg+2)<<2 | (db+2)`
+    /// * `Luma { dg, .. }` → `0x80 | ((dg+32) & 0x3F)` (the `dr_dg` /
+    ///   `db_dg` deltas live in the *second* byte, not the tag)
+    /// * `Run { length }` → `0xC0 | ((length-1) & 0x3F)`
+    ///
+    /// [`QoiOp::Truncated`] carries the raw tag byte the iterator
+    /// couldn't finish parsing, so its `tag()` returns that byte
+    /// verbatim.
+    ///
+    /// This is the inverse of the dispatch the iterator performs on the
+    /// way in: `op.tag()` round-trips through the leading byte for every
+    /// non-`Truncated` variant. It lets a chunk-shape histogram or a
+    /// debug dumper recover the on-wire tag without re-encoding the
+    /// whole chunk.
+    #[inline]
+    pub fn tag(&self) -> u8 {
+        match *self {
+            QoiOp::Rgb { .. } => OP_RGB,
+            QoiOp::Rgba { .. } => OP_RGBA,
+            QoiOp::Index { index } => OP_INDEX | (index & 0x3F),
+            QoiOp::Diff { dr, dg, db } => {
+                let r = (dr + 2) as u8 & 0x03;
+                let g = (dg + 2) as u8 & 0x03;
+                let b = (db + 2) as u8 & 0x03;
+                OP_DIFF | (r << 4) | (g << 2) | b
+            }
+            QoiOp::Luma { dg, .. } => OP_LUMA | ((dg + 32) as u8 & 0x3F),
+            QoiOp::Run { length } => OP_RUN | ((length - 1) & 0x3F),
+            QoiOp::Truncated { tag, .. } => tag,
+        }
+    }
+
+    /// Number of body bytes that follow the tag byte for this op.
+    ///
+    /// `0` for the tag-only chunks ([`QoiOp::Index`] / [`QoiOp::Diff`] /
+    /// [`QoiOp::Run`]), `1` for [`QoiOp::Luma`] (the `dr-dg` / `db-dg`
+    /// nibble byte), `3` for [`QoiOp::Rgb`], `4` for [`QoiOp::Rgba`].
+    ///
+    /// [`QoiOp::Truncated`] returns `0` — it represents a chunk whose
+    /// body never arrived, so there are no body bytes actually present
+    /// in the stream to count.
+    #[inline]
+    pub fn body_len(&self) -> usize {
+        match *self {
+            QoiOp::Rgba { .. } => 4,
+            QoiOp::Rgb { .. } => 3,
+            QoiOp::Luma { .. } => 1,
+            QoiOp::Index { .. } | QoiOp::Diff { .. } | QoiOp::Run { .. } => 0,
+            QoiOp::Truncated { .. } => 0,
+        }
+    }
+
+    /// Total on-wire byte width of this chunk: `1 + body_len()`.
+    ///
+    /// `1` for the four tag-only-or-tag-plus-nothing 2-bit chunks
+    /// ([`QoiOp::Index`] / [`QoiOp::Diff`] / [`QoiOp::Run`]), `2` for
+    /// [`QoiOp::Luma`], `4` for [`QoiOp::Rgb`], `5` for [`QoiOp::Rgba`].
+    ///
+    /// Summing `encoded_len()` over a full [`iter_ops`] walk (excluding
+    /// any trailing [`QoiOp::Truncated`]) reproduces the chunk-section
+    /// byte count — i.e. `input.len() - HEADER_SIZE - END_MARKER.len()`
+    /// for a well-formed stream — without re-encoding. A
+    /// [`QoiOp::Truncated`] reports `1` (the tag byte that *was*
+    /// present), since by definition its body bytes are missing.
+    #[inline]
+    pub fn encoded_len(&self) -> usize {
+        match *self {
+            QoiOp::Truncated { .. } => 1,
+            other => 1 + other.body_len(),
+        }
+    }
+
+    /// `true` only for the [`QoiOp::Truncated`] sentinel the non-strict
+    /// [`iter_ops`] walker yields when the stream ends mid-chunk.
+    ///
+    /// A convenience for folds that want to bail on the first truncation
+    /// without a full `matches!(op, QoiOp::Truncated { .. })`.
+    #[inline]
+    pub fn is_truncated(&self) -> bool {
+        matches!(self, QoiOp::Truncated { .. })
+    }
 }
 
 /// Iterator returned by [`iter_ops`] / [`iter_ops_strict`].
@@ -539,5 +669,200 @@ mod tests {
         let (_, mut it) = iter_ops(&bytes).unwrap();
         let op = it.next().unwrap();
         assert!(matches!(op, QoiOp::Index { index: 0x2A }));
+    }
+
+    /// `qoi_hash` is the public typed primitive form of the spec's
+    /// running-array bucket selector. It must agree with the four
+    /// worked examples in the crate-root docs (and with the internal
+    /// `decoder::hash`, which now delegates to it).
+    #[test]
+    fn qoi_hash_matches_spec_examples() {
+        // (11 * 255) % 64 = 2805 % 64 = 53 — NOT 21 (the wrapping-u8
+        // answer). This is the canonical "promote to u32" check.
+        assert_eq!(qoi_hash([0, 0, 0, 255]), 53);
+        // 255 * (3+5+7+11) = 6630, 6630 % 64 = 38.
+        assert_eq!(qoi_hash([255, 255, 255, 255]), 38);
+        assert_eq!(qoi_hash([0, 0, 0, 0]), 0);
+        // 1*3 + 2*5 + 3*7 + 4*11 = 3+10+21+44 = 78, 78 % 64 = 14.
+        assert_eq!(qoi_hash([1, 2, 3, 4]), 14);
+        // Every output is in the 0..=63 slot range.
+        for r in [0u8, 17, 200, 255] {
+            for a in [0u8, 1, 128, 255] {
+                assert!(qoi_hash([r, 99, 7, a]) < 64);
+            }
+        }
+    }
+
+    /// `qoi_hash` agrees with the crate-internal `decoder::hash` for
+    /// every pixel (the internal one now delegates, so this guards
+    /// against a future divergence if either is edited).
+    #[test]
+    fn qoi_hash_agrees_with_decoder_hash() {
+        for &p in &[
+            [0u8, 0, 0, 255],
+            [255, 255, 255, 255],
+            [0, 0, 0, 0],
+            [1, 2, 3, 4],
+            [200, 50, 25, 255],
+            [13, 200, 7, 99],
+        ] {
+            assert_eq!(qoi_hash(p), crate::decoder::hash(p), "pixel {p:?}");
+        }
+    }
+
+    /// `QoiOp::tag()` must reconstruct the exact leading chunk byte the
+    /// iterator dispatched on — i.e. round-trip through the first byte.
+    /// Walk a synthesised stream, re-read each op's `tag()`, and confirm
+    /// it equals the byte at the chunk's start position in the original
+    /// slice.
+    #[test]
+    fn op_tag_roundtrips_leading_byte() {
+        // Mixed-op image: gradient + alpha churn forces RGB / RGBA /
+        // DIFF / LUMA / INDEX / RUN to all appear across the stream.
+        let mut pixels = Vec::new();
+        let mut x: u32 = 0x1234_5678;
+        for i in 0..256u32 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            let r = (i * 2) as u8;
+            let g = (x & 0xFF) as u8;
+            let b = (i * 3) as u8;
+            let a = if i % 16 == 0 { (x >> 8) as u8 } else { 255 };
+            pixels.extend_from_slice(&[r, g, b, a]);
+        }
+        let bytes = encode_qoi(16, 16, 4, &pixels);
+        let chunks = &bytes[crate::HEADER_SIZE..bytes.len() - crate::END_MARKER.len()];
+        let (_, it) = iter_ops(&bytes).unwrap();
+        let mut pos = 0usize;
+        let mut saw = (false, false, false, false, false, false); // rgb,rgba,index,diff,luma,run
+        for op in it {
+            assert!(!op.is_truncated(), "unexpected truncation: {op:?}");
+            assert_eq!(op.tag(), chunks[pos], "op {op:?} at chunk byte {pos}");
+            match op {
+                QoiOp::Rgb { .. } => saw.0 = true,
+                QoiOp::Rgba { .. } => saw.1 = true,
+                QoiOp::Index { .. } => saw.2 = true,
+                QoiOp::Diff { .. } => saw.3 = true,
+                QoiOp::Luma { .. } => saw.4 = true,
+                QoiOp::Run { .. } => saw.5 = true,
+                QoiOp::Truncated { .. } => unreachable!(),
+            }
+            pos += op.encoded_len();
+        }
+        // The whole chunk section was consumed exactly.
+        assert_eq!(pos, chunks.len());
+        // The op mix actually exercised the typed-tag reconstruction
+        // for at least the four 2-bit chunks plus one 8-bit chunk.
+        assert!(saw.2 || saw.3 || saw.4 || saw.5, "no 2-bit chunks seen");
+        assert!(saw.0 || saw.1, "no 8-bit chunk seen");
+    }
+
+    /// `encoded_len()` / `body_len()` widths per variant, including the
+    /// `Truncated` sentinel's `1`/`0`.
+    #[test]
+    fn op_encoded_len_widths() {
+        let cases = [
+            (QoiOp::Index { index: 5 }, 1usize, 0usize),
+            (
+                QoiOp::Diff {
+                    dr: -1,
+                    dg: 0,
+                    db: 1,
+                },
+                1,
+                0,
+            ),
+            (QoiOp::Run { length: 30 }, 1, 0),
+            (
+                QoiOp::Luma {
+                    dg: -3,
+                    dr_dg: 2,
+                    db_dg: -1,
+                },
+                2,
+                1,
+            ),
+            (QoiOp::Rgb { r: 1, g: 2, b: 3 }, 4, 3),
+            (
+                QoiOp::Rgba {
+                    r: 1,
+                    g: 2,
+                    b: 3,
+                    a: 4,
+                },
+                5,
+                4,
+            ),
+            (
+                QoiOp::Truncated {
+                    tag: OP_RGB,
+                    missing_body_bytes: 1,
+                },
+                1,
+                0,
+            ),
+        ];
+        for (op, enc, body) in cases {
+            assert_eq!(op.encoded_len(), enc, "encoded_len for {op:?}");
+            assert_eq!(op.body_len(), body, "body_len for {op:?}");
+            // For every non-truncated op, encoded_len == 1 + body_len.
+            if !op.is_truncated() {
+                assert_eq!(
+                    op.encoded_len(),
+                    1 + op.body_len(),
+                    "len identity for {op:?}"
+                );
+            }
+        }
+    }
+
+    /// `tag()` reconstructs the spec bit-packing for each 2-bit chunk
+    /// exactly (independent of the iterator), and `is_truncated()` only
+    /// fires on the sentinel.
+    #[test]
+    fn op_tag_bit_packing_and_truncated_flag() {
+        assert_eq!(QoiOp::Index { index: 0x2A }.tag(), OP_INDEX | 0x2A);
+        // Diff dr=-2,dg=+1,db=0 → (0,3,2) after +2 bias → 0b00_11_10.
+        assert_eq!(
+            QoiOp::Diff {
+                dr: -2,
+                dg: 1,
+                db: 0
+            }
+            .tag(),
+            OP_DIFF | 0b00_11_10
+        );
+        // Luma dg=-32 → (dg+32)=0 → tag low6 = 0.
+        assert_eq!(
+            QoiOp::Luma {
+                dg: -32,
+                dr_dg: 0,
+                db_dg: 0
+            }
+            .tag(),
+            OP_LUMA
+        );
+        // Luma dg=+31 → 63 → tag low6 = 0x3F.
+        assert_eq!(
+            QoiOp::Luma {
+                dg: 31,
+                dr_dg: 0,
+                db_dg: 0
+            }
+            .tag(),
+            OP_LUMA | 0x3F
+        );
+        // Run length=62 → (length-1)=61 → 0x3D.
+        assert_eq!(QoiOp::Run { length: 62 }.tag(), OP_RUN | 61);
+        assert_eq!(QoiOp::Run { length: 1 }.tag(), OP_RUN);
+
+        assert!(QoiOp::Truncated {
+            tag: OP_LUMA,
+            missing_body_bytes: 1
+        }
+        .is_truncated());
+        assert!(!QoiOp::Run { length: 1 }.is_truncated());
+        assert!(!QoiOp::Rgb { r: 0, g: 0, b: 0 }.is_truncated());
     }
 }

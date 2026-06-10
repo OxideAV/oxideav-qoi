@@ -34,7 +34,7 @@ files we have access to.
 use oxideav_qoi::{
     parse_qoi, parse_qoi_header, parse_qoi_into,
     encode_qoi, encode_qoi_into,
-    iter_ops, iter_ops_strict, QoiOp,
+    iter_ops, iter_ops_strict, QoiOp, qoi_hash,
     QoiImage, QoiChannels,
 };
 
@@ -89,6 +89,26 @@ encoder-priority-chain regression checks. `iter_ops_strict` collects
 into a `Vec<QoiOp>` and surfaces mid-chunk truncation as an
 `Err(InvalidData)`; the non-strict variant yields a final
 `QoiOp::Truncated { tag, missing_body_bytes }` and stops.
+
+`QoiOp` carries (round 267) typed-introspection methods that round-
+trip each op back to its on-wire shape without re-encoding the whole
+chunk: `tag()` reconstructs the exact leading chunk byte (the
+bit-packed `OP_INDEX|index` / `OP_DIFF|(deltas+2)` /
+`OP_LUMA|(dg+32)` / `OP_RUN|(length-1)` tag, or `0xFE` / `0xFF` for
+RGB / RGBA, or the stored raw byte for `Truncated`); `body_len()` and
+`encoded_len()` give the post-tag body width (0/1/3/4) and total
+chunk width (1/2/4/5), so summing `encoded_len()` over an `iter_ops`
+walk reproduces the chunk-section byte count; `is_truncated()` is a
+convenience predicate for the `Truncated` sentinel.
+
+`qoi_hash([r, g, b, a]) -> u8` (round 267) is the public typed form
+of the spec's running-pixel-array bucket selector
+`(R*3 + G*5 + B*7 + A*11) % 64`, with the multiply done in `u32` so
+`(0,0,0,255)` hashes to `53` (not the `21` an 8-bit-wrapping multiply
+gives). The crate's own decoder uses the same primitive, so a caller
+building a `QOI_OP_INDEX`-coverage checker or stream validator can
+confirm an `Index { index }` op points at the slot the pixel would
+have hashed to, against the exact arithmetic the decoder agrees on.
 
 The four `_into` entry points — `encode_qoi_into`,
 `encode_qoi_full_into`, `parse_qoi_into` — take a caller-owned

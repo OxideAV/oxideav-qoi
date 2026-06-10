@@ -105,7 +105,7 @@ pub use decoder::{parse_qoi, parse_qoi_header, parse_qoi_into};
 pub use encoder::{encode_qoi, encode_qoi_full, encode_qoi_full_into, encode_qoi_into};
 pub use error::{QoiError, Result};
 pub use image::{QoiChannels, QoiColorspace, QoiHeader, QoiImage};
-pub use ops::{iter_ops, iter_ops_strict, QoiOp, QoiOpIter};
+pub use ops::{iter_ops, iter_ops_strict, qoi_hash, QoiOp, QoiOpIter};
 
 #[cfg(feature = "registry")]
 pub use registry::{__oxideav_entry, register, register_codecs, register_containers};

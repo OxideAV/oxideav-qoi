@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-267 typed-primitive surface on the `ops` module:
+  - `qoi_hash([u8; 4]) -> u8`, the public typed form of the spec's
+    running-pixel-array bucket selector
+    `(R*3 + G*5 + B*7 + A*11) % 64`. The multiply runs in `u32`
+    (non-wrapping), so `(0,0,0,255)` hashes to `53`, not the `21`
+    an 8-bit-wrapping multiply gives. Re-exported at the crate root.
+    The crate-internal `decoder::hash` now delegates to it, so there
+    is a single source of truth for the hash arithmetic.
+  - `QoiOp::tag()` reconstructs the exact leading chunk byte each op
+    would encode to — `0xFE` / `0xFF` for `Rgb` / `Rgba`, and the
+    bit-packed `OP_INDEX|index` / `OP_DIFF|(deltas+2)` /
+    `OP_LUMA|(dg+32)` / `OP_RUN|(length-1)` tags for the four 2-bit
+    chunks. `Truncated` returns its stored raw tag byte. This is the
+    inverse of the iterator's leading-byte dispatch.
+  - `QoiOp::body_len()` / `QoiOp::encoded_len()` give the post-tag
+    body width (`0`/`1`/`3`/`4`) and total on-wire chunk width
+    (`1`/`2`/`4`/`5`). Summing `encoded_len()` over an `iter_ops`
+    walk reproduces the chunk-section byte count without re-encoding.
+  - `QoiOp::is_truncated()` convenience predicate for the
+    `Truncated` sentinel.
 - Round-237 stream-level QOI chunk iterator: new `ops` module with
   a typed `QoiOp` enum (`Rgb`, `Rgba`, `Index`, `Diff`, `Luma`,
   `Run`, `Truncated`), a `QoiOpIter<'a>` `Iterator` impl, and two

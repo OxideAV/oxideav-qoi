@@ -403,11 +403,12 @@ impl Chunk {
 /// scrambles the index distribution, so we promote everything to u32.
 #[inline]
 pub(crate) fn hash(p: [u8; 4]) -> u8 {
-    let r = p[0] as u32;
-    let g = p[1] as u32;
-    let b = p[2] as u32;
-    let a = p[3] as u32;
-    ((r * 3 + g * 5 + b * 7 + a * 11) & 0x3F) as u8
+    // Single source of truth lives in `crate::ops::qoi_hash` (the
+    // public typed primitive). This crate-internal alias keeps the
+    // hot decode/encode call sites terse and stable while delegating
+    // the arithmetic — `#[inline]` collapses the indirection so the
+    // codegen is identical to an open-coded multiply here.
+    crate::ops::qoi_hash(p)
 }
 
 /// Write a pixel into the pre-allocated output buffer at byte offset
