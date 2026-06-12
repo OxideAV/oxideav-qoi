@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round-282 encoder run-arm restructure (profile-guided): when a
+  pixel equals the previous one, the encoder now consumes the WHOLE
+  run with a wide scan-ahead (16-byte / 4-pixel block compares for
+  RGBA, 12-byte / 4-pixel for RGB, scalar tail at the run boundary)
+  and emits all the `QOI_OP_RUN` chunks at once (⌊N/62⌋ max-length
+  chunks + remainder) instead of re-entering the per-pixel loop —
+  load + compare + run-counter bookkeeping + flush test — once per
+  matching pixel. The running-pixel-array store for the run also
+  collapses from one no-op-repeat store (each re-deriving the
+  `(R*3+G*5+B*7+A*11) % 64` hash) per pixel to a single store when
+  the run opens; index state observed by later INDEX lookups is
+  unchanged because lookups only happen after the run breaks.
+  Removing the `run` counter also drops the pending-run flush test
+  from the non-run fall-through path. Output is byte-identical
+  (reference-fixture byte-exact round-trip tests + a 5½-minute
+  `encode_roundtrip` fuzz run confirm). Criterion, three interleaved
+  pre/post pairs on the Apple-silicon dev box: RUN-dominated solid
+  512×512 RGBA 2.66–2.70 GiB/s → 24.6–24.8 GiB/s (~9.2×); RGBA
+  320×240 gradient 896–952 MiB/s → 999–1068 MiB/s (~+7%); RGB24
+  gradient, alpha-changing, and INDEX-cycle rows unchanged within
+  noise.
+
 ## [0.1.3](https://github.com/OxideAV/oxideav-qoi/compare/v0.1.2...v0.1.3) - 2026-06-10
 
 ### Other

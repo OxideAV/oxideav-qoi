@@ -1,4 +1,4 @@
-# oxideav-qoi round-175 profile baseline (refreshed rounds 183 + 205 + 231)
+# oxideav-qoi round-175 profile baseline (refreshed rounds 183 + 205 + 231 + 282)
 
 This directory captures the profiling-baseline numbers produced by the
 `examples/profile_qoi.rs` driver that round 175 introduces. The driver
@@ -34,6 +34,25 @@ to a fixed-width array literal. The solid-RUN row also benefited
 because the run-flush byte store no longer sits behind a
 discriminant load.
 
+Round 282 restructured the encoder's run arm. The r231 loop still
+re-entered the per-pixel body once per matching pixel — a 4-byte
+load, a compare, a run-counter increment, a flush-at-62 /
+flush-at-image-end test, and a redundant index store that re-derived
+the `(R*3+G*5+B*7+A*11) % 64` hash for an identical value landing in
+an identical slot. The r282 run arm instead consumes the WHOLE run
+in one outlined scan-ahead (`run_scan_emit_rgba` /
+`run_scan_emit_rgb`): a 16-byte (RGBA) / 12-byte (RGB) 4-pixel
+block-compare loop that lowers to word-width loads + compares, a
+scalar tail for the block straddling the run's end, then ⌊N/62⌋
+max-length `QOI_OP_RUN` chunks + one remainder chunk emitted
+back-to-back — byte-identical to the old flush-at-62 emission. The
+index store collapses to a single store when the run opens (later
+INDEX-arm lookups only happen after the run breaks, so the observed
+state is unchanged). Dropping the `run` counter also removes the
+pending-run flush test from the non-run fall-through path, which is
+where the RGBA gradient row's ~7% comes from. The solid-RUN encode
+row moves 2.7 GiB/s → 24.8 GiB/s (~9.2×).
+
 The Criterion harnesses under `benches/` (added in round 156)
 measure steady-state throughput in a sampling framework — great for
 A/B regression detection, poor for `samply` / `perf record` /
@@ -43,7 +62,7 @@ hot paths. The profile driver is a flat measure-this-thing loop with
 a single `Instant::now()` / `elapsed()` pair around a fixed iteration
 count — clean stacks, comparable wall-clock cost.
 
-## Headline numbers (round 231 refresh, Apple-silicon dev box, release build)
+## Headline numbers (round 282 refresh, Apple-silicon dev box, release build)
 
 Each scenario is self-contained (deterministic xorshift32-seeded
 synthetic input, no external fixtures, no `tests/fixtures/` reads).
@@ -52,25 +71,25 @@ so profile output and bench numbers correspond.
 
 ```
 == encode ==
-  encode    rgba/320x240/gradient              iters= 3000    0.301 ms/iter    973.87 MiB/s (raw)  out=122515B/iter (0.399 of input)
-  encode    rgb24/640x480/gradient             iters= 3000    1.349 ms/iter    651.74 MiB/s (raw)  out=479751B/iter (0.521 of input)
-  encode    rgba/512x512/solid-run             iters= 3000    0.362 ms/iter   2762.56 MiB/s (raw)  out=4255B/iter (0.004 of input)
-  encode    rgba/320x240/alpha-changing        iters= 3000    0.140 ms/iter   2097.27 MiB/s (raw)  out=383716B/iter (1.249 of input)
-  encode    rgba/320x240/index-cycle           iters= 3000    0.113 ms/iter   2602.65 MiB/s (raw)  out=76846B/iter (0.250 of input)
+  encode    rgba/320x240/gradient              iters=  200    0.294 ms/iter    997.32 MiB/s (raw)  out=122515B/iter (0.399 of input)
+  encode    rgb24/640x480/gradient             iters=   80    1.366 ms/iter    643.47 MiB/s (raw)  out=479751B/iter (0.521 of input)
+  encode    rgba/512x512/solid-run             iters=  200    0.039 ms/iter  25374.41 MiB/s (raw)  out=4255B/iter (0.004 of input)
+  encode    rgba/320x240/alpha-changing        iters=  200    0.124 ms/iter   2359.48 MiB/s (raw)  out=383716B/iter (1.249 of input)
+  encode    rgba/320x240/index-cycle           iters=  300    0.108 ms/iter   2719.36 MiB/s (raw)  out=76846B/iter (0.250 of input)
 
 == decode ==
-  decode    rgba/320x240/gradient              iters= 3000    0.255 ms/iter   1148.17 MiB/s (raw)
-  decode    rgb24/640x480/gradient             iters= 3000    1.335 ms/iter    658.42 MiB/s (raw)
-  decode    rgba/512x512/solid-run             iters= 3000    0.027 ms/iter  37705.46 MiB/s (raw)
-  decode    rgba/320x240/alpha-changing        iters= 3000    0.091 ms/iter   3212.77 MiB/s (raw)
-  decode    rgba/320x240/index-cycle           iters= 3000    0.106 ms/iter   2775.75 MiB/s (raw)
+  decode    rgba/320x240/gradient              iters=  200    0.248 ms/iter   1180.69 MiB/s (raw)
+  decode    rgb24/640x480/gradient             iters=   80    1.311 ms/iter    670.66 MiB/s (raw)
+  decode    rgba/512x512/solid-run             iters=  200    0.026 ms/iter  38157.02 MiB/s (raw)
+  decode    rgba/320x240/alpha-changing        iters=  200    0.091 ms/iter   3222.04 MiB/s (raw)
+  decode    rgba/320x240/index-cycle           iters=  300    0.105 ms/iter   2801.21 MiB/s (raw)
 
 == roundtrip ==
-  roundtrip rgba/320x240/gradient              iters= 3000    0.578 ms/iter    507.15 MiB/s (raw)
-  roundtrip rgb24/640x480/gradient             iters= 3000    2.786 ms/iter    315.45 MiB/s (raw)
-  roundtrip rgba/512x512/solid-run             iters= 3000    0.400 ms/iter   2502.86 MiB/s (raw)
-  roundtrip rgba/320x240/alpha-changing        iters= 3000    0.242 ms/iter   1208.59 MiB/s (raw)
-  roundtrip rgba/320x240/index-cycle           iters= 3000    0.220 ms/iter   1332.37 MiB/s (raw)
+  roundtrip rgba/320x240/gradient              iters=  200    0.564 ms/iter    519.48 MiB/s (raw)
+  roundtrip rgb24/640x480/gradient             iters=   80    2.679 ms/iter    328.12 MiB/s (raw)
+  roundtrip rgba/512x512/solid-run             iters=  200    0.074 ms/iter  13555.03 MiB/s (raw)
+  roundtrip rgba/320x240/alpha-changing        iters=  200    0.223 ms/iter   1314.07 MiB/s (raw)
+  roundtrip rgba/320x240/index-cycle           iters=  300    0.212 ms/iter   1383.50 MiB/s (raw)
 ```
 
 ### Round-183 delta vs the original round-175 baseline (decode)
@@ -96,6 +115,34 @@ hot loop the autovectoriser turns into a wide-store memcpy.
 | RGBA 512×512 solid-RUN            |  2.15 GiB/s    |  2.29 GiB/s     | 1.08×   |
 | RGBA 320×240 alpha-changing       |  1.06 GiB/s    |  1.96 GiB/s     | 1.85×   |
 | RGBA 320×240 8-colour INDEX cycle |  2.03 GiB/s    |  2.44 GiB/s     | 1.18×   |
+
+### Round-282 delta vs the round-231 baseline (encode, criterion)
+
+Three interleaved pre/post criterion pairs (`--save-baseline pre1` /
+`post1` / `pre2` / `post2` / `pre3` / `post3`); ranges below are the
+spread of the three point estimates per side.
+
+| Scenario                          | Encode pre (r231)      | Encode post (r282)     | Speedup |
+| --------------------------------- | ---------------------- | ---------------------- | ------- |
+| RGBA 320×240 gradient             |   896–952 MiB/s        |   999–1068 MiB/s       | ~1.07×  |
+| RGB24 640×480 gradient            |   646–669 MiB/s        |   660–669 MiB/s        | parity  |
+| RGBA 512×512 solid-RUN            |  2.66–2.70 GiB/s       |  24.6–24.8 GiB/s       | ~9.2×   |
+| RGBA 320×240 alpha-changing       |  2.09–2.15 GiB/s       |  2.01–2.15 GiB/s       | parity  |
+| RGBA 320×240 8-colour INDEX cycle |  2.59–2.62 GiB/s       |  2.44–2.65 GiB/s       | parity  |
+
+The solid-RUN row is the structural win: the run arm no longer
+executes per pixel at all — a 256-Kpixel solid image is consumed by
+~64 K block compares plus ~4 K run-chunk byte stores, the same
+chunks_exact-style shape that took the DECODE side's solid-RUN row
+to 37 GiB/s in r183. The RGBA gradient row's ~7% is the indirect
+effect: removing the `run` counter removes the `run > 0`
+pending-flush test from the per-pixel fall-through path that
+gradient pixels (which almost never open a run) always paid.
+Byte-exactness pin: the four reference-fixture byte-exact
+round-trip tests + the `encode_roundtrip` fuzz target (5½-minute
+post-change run, 0 failures) — emission order of ⌊N/62⌋ + remainder
+chunks is provably identical to the old flush-at-62 /
+flush-at-image-end sequence.
 
 ### Round-231 delta vs the round-205 baseline (encode)
 
@@ -155,21 +202,25 @@ was already the limit of what r205's cursor-write could shed.
 - Encode is dominated by the **chunk-selection priority chain**
   (RUN > INDEX > DIFF > LUMA > RGB / RGBA) the spec mandates and the
   `encoder.rs::encode_qoi_full` loop walks every pixel. The
-  `solid-run` scenario hits ~2.70 GiB/s because the `cur == prev`
-  fast path skips the per-pixel hash + DIFF / LUMA arithmetic; the
-  `alpha-changing` scenario hits ~2.05 GiB/s because every pixel
-  bypasses the DIFF / LUMA / RGB tests and emits the unconditional
-  5-byte RGBA chunk — a tag store + 4-byte `copy_from_slice`.
-- `gradient` (RGBA 320×240) is the worst encode case at ~970 MiB/s
-  (post r231) because every pixel actually walks the full priority
+  `solid-run` scenario hits ~24.8 GiB/s (post r282) because the
+  `cur == prev` arm now consumes the whole run with a 4-pixel
+  block-compare scan-ahead instead of one per-pixel loop iteration
+  per matching pixel; the `alpha-changing` scenario hits
+  ~2.3 GiB/s because every pixel bypasses the DIFF / LUMA / RGB
+  tests and emits the unconditional 5-byte RGBA chunk — a tag store
+  + 4-byte `copy_from_slice`.
+- `gradient` (RGBA 320×240) is the worst encode case at ~1.0 GiB/s
+  (post r282) because every pixel actually walks the full priority
   chain — the DIFF range check fails on most pixels (the xorshift
   noise pushes deltas outside ±1), the LUMA range check then runs,
   and only then does the per-pixel hash + index store happen. The
   r231 channel split removed the per-pixel match on `qoi_channels`
-  + the synthetic `cur[3] = prev[3]` on the RGB path; what remains
-  is the chain's own arithmetic. The next encode-side improvement
-  candidates are SIMD batch-load of pixel groups + a tighter LUMA
-  fast path that avoids the second range pair when DIFF fails.
+  + the synthetic `cur[3] = prev[3]` on the RGB path; the r282 run
+  restructure removed the `run > 0` pending-flush test from the
+  fall-through path; what remains is the chain's own arithmetic.
+  The next encode-side improvement candidates are SIMD batch-load
+  of pixel groups + a tighter LUMA fast path that avoids the
+  second range pair when DIFF fails.
 - `index-cycle` is the cheapest at ~2.6 GiB/s because the 8-colour
   palette puts a hit at `index[hash(cur)]` on every cycle pass; the
   short-circuit at the INDEX arm skips the DIFF / LUMA / RGB checks

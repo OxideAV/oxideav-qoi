@@ -139,17 +139,17 @@ op-mix surface:
 * a per-pixel-changing-alpha worst case (`QOI_OP_RGBA` dominated),
 * an 8-colour cycle (`QOI_OP_INDEX` hot path).
 
-Round-231 baseline on an Apple-silicon dev box (post-encoder
-channel-specialised split — see `profile/README.md` "Round-231
+Round-282 baseline on an Apple-silicon dev box (post-encoder
+run-arm wide scan-ahead — see `profile/README.md` "Round-282
 delta" for the side-by-side; decode column unchanged since r183):
 
 | Scenario                          | Decode      | Encode      | Roundtrip   |
 | --------------------------------- | ----------- | ----------- | ----------- |
-| RGBA 320×240 gradient             |  1.12 GiB/s |   970 MiB/s |   507 MiB/s |
-| RGB24 640×480 gradient            |   643 MiB/s |   665 MiB/s |   315 MiB/s |
-| RGBA 512×512 solid (RUN-heavy)    |  36.8 GiB/s |  2.68 GiB/s |  2.44 GiB/s |
-| RGBA 320×240 alpha-changing       |  3.14 GiB/s |  2.05 GiB/s |  1.18 GiB/s |
-| RGBA 320×240 8-colour INDEX cycle |  2.71 GiB/s |  2.62 GiB/s |  1.30 GiB/s |
+| RGBA 320×240 gradient             |  1.15 GiB/s |   997 MiB/s |   519 MiB/s |
+| RGB24 640×480 gradient            |   671 MiB/s |   643 MiB/s |   328 MiB/s |
+| RGBA 512×512 solid (RUN-heavy)    |  37.3 GiB/s |  24.8 GiB/s |  13.2 GiB/s |
+| RGBA 320×240 alpha-changing       |  3.15 GiB/s |  2.30 GiB/s |  1.28 GiB/s |
+| RGBA 320×240 8-colour INDEX cycle |  2.74 GiB/s |  2.66 GiB/s |  1.35 GiB/s |
 
 A round-225 `reuse` bench A/Bs the new `_into` buffer-reuse
 surface against the allocating wrappers on a tight 256-call inner
@@ -197,7 +197,18 @@ alpha-equality test at all (alpha is provably `0xff` for the
 entire stream). RGB24 gradient encode moved from 593 MiB/s →
 665 MiB/s (1.12×) and RGBA gradient from 891 MiB/s → 970 MiB/s
 (1.09×); the RUN-dominated row also picked up 1.21× as the
-chunk-byte index-load shape simplifies under the split.
+chunk-byte index-load shape simplifies under the split. Round 282
+restructured the encoder's run arm: instead of re-entering the
+per-pixel loop (load + compare + run-counter bookkeeping + flush
+test + a redundant per-pixel index store, each re-deriving the
+hash) once per matching pixel, the encoder consumes the whole run
+with an outlined wide scan-ahead — 16-byte (RGBA) / 12-byte (RGB)
+4-pixel block compares with a scalar tail — and emits all the
+`QOI_OP_RUN` chunks at once, byte-identical to the old
+flush-at-62 emission. The RUN-dominated encode row moved from
+2.68 GiB/s → 24.8 GiB/s (~9.2×) and the RGBA gradient picked up
+~7% from the run state (and its pending-flush test) dropping out
+of the non-run fall-through path.
 
 ```sh
 cargo run --release --example profile_qoi -- all

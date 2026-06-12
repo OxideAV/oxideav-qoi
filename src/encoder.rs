@@ -255,9 +255,9 @@ fn encode_inner_rgba(
     let mut out_pos = out_pos_start;
     let mut prev: [u8; 4] = [0, 0, 0, 255];
     let mut index: [[u8; 4]; 64] = [[0, 0, 0, 0]; 64];
-    let mut run: u8 = 0;
 
-    for i in 0..pixel_count {
+    let mut i = 0usize;
+    while i < pixel_count {
         let off = i * 4;
         let cur: [u8; 4] = [
             pixels[off],
@@ -267,32 +267,25 @@ fn encode_inner_rgba(
         ];
 
         if cur == prev {
-            run += 1;
+            // Round-282 run-arm restructure: consume the WHOLE run in
+            // one outlined scan-ahead call instead of re-entering the
+            // per-pixel loop (load + compare + run-counter bookkeeping
+            // + flush test) once per matching pixel. See
+            // [`run_scan_emit_rgba`] for the scan + emission +
+            // index-store equivalence details.
+            //
             // Per spec, every pixel seen by the encoder is put into
-            // the index. For a RUN that's `run` copies of `prev`, all
-            // landing in the same slot — equivalent to a single store
-            // of `prev` at `hash(prev)`. We do it once per matching
-            // pixel; the redundant repeats are no-ops since the slot
-            // already holds `prev`.
+            // the index. For a RUN that's N copies of `prev`, all
+            // landing in the same slot — equivalent to a SINGLE store
+            // of `prev` at `hash(prev)`. The previous per-pixel store
+            // was a no-op repeat that still re-derived `hash(cur)`
+            // (three multiplies + adds) per pixel; the index state
+            // observed by every later INDEX-arm lookup is unchanged
+            // (lookups only happen after the run breaks).
             index[hash(cur) as usize] = cur;
-            // The QOI_OP_RUN field stores `run-1` in 6 bits, so the
-            // legal max for a single chunk is 62 (tags 62 / 63 are
-            // stolen by the 8-bit RGB / RGBA tags). At 62 we have
-            // to flush even if the next pixel matches.
-            if run == 62 || i + 1 == pixel_count {
-                buf[out_pos] = OP_RUN | (run - 1);
-                out_pos += 1;
-                run = 0;
-            }
+            // `prev` already equals `cur`; resume after the run.
+            (i, out_pos) = run_scan_emit_rgba(buf, out_pos, pixels, pixel_count, i, cur);
         } else {
-            // Any pending run must be flushed before we emit a new
-            // chunk for `cur`.
-            if run > 0 {
-                buf[out_pos] = OP_RUN | (run - 1);
-                out_pos += 1;
-                run = 0;
-            }
-
             let h = hash(cur) as usize;
             if index[h] == cur {
                 buf[out_pos] = OP_INDEX | h as u8;
@@ -337,8 +330,9 @@ fn encode_inner_rgba(
                     out_pos += 5;
                 }
             }
+            prev = cur;
+            i += 1;
         }
-        prev = cur;
     }
 
     out_pos
@@ -370,9 +364,9 @@ fn encode_inner_rgb(
     // RGBA path would.
     let mut prev: [u8; 4] = [0, 0, 0, 255];
     let mut index: [[u8; 4]; 64] = [[0, 0, 0, 0]; 64];
-    let mut run: u8 = 0;
 
-    for i in 0..pixel_count {
+    let mut i = 0usize;
+    while i < pixel_count {
         let off = i * 3;
         // Alpha stays 0xff for the entire RGB stream — no per-pixel
         // load, no per-pixel `cur[3] = prev[3]` synthesis, no
@@ -380,20 +374,12 @@ fn encode_inner_rgb(
         let cur: [u8; 4] = [pixels[off], pixels[off + 1], pixels[off + 2], 0xff];
 
         if cur == prev {
-            run += 1;
+            // Round-282 run-arm restructure — see the RGBA loop's run
+            // arm for the single-index-store equivalence argument and
+            // [`run_scan_emit_rgb`] for the wide-scan details.
             index[hash(cur) as usize] = cur;
-            if run == 62 || i + 1 == pixel_count {
-                buf[out_pos] = OP_RUN | (run - 1);
-                out_pos += 1;
-                run = 0;
-            }
+            (i, out_pos) = run_scan_emit_rgb(buf, out_pos, pixels, pixel_count, i, cur);
         } else {
-            if run > 0 {
-                buf[out_pos] = OP_RUN | (run - 1);
-                out_pos += 1;
-                run = 0;
-            }
-
             let h = hash(cur) as usize;
             if index[h] == cur {
                 buf[out_pos] = OP_INDEX | h as u8;
@@ -431,11 +417,113 @@ fn encode_inner_rgb(
                     }
                 }
             }
+            prev = cur;
+            i += 1;
         }
-        prev = cur;
     }
 
     out_pos
+}
+
+/// Round-282 run scan + emit (RGBA layout). The caller has already
+/// observed `pixels[i] == prev` and stored the run's pixel into the
+/// running index; this helper finds where the run ends and emits the
+/// corresponding `QOI_OP_RUN` chunks.
+///
+/// Scans forward from pixel `i + 1` over pixels equal to `cur`, then
+/// emits the whole run (length `j - i`) as ⌊N/62⌋ max-length chunks
+/// followed by one remainder chunk — byte-identical to the previous
+/// per-pixel flush-at-62 / flush-at-image-end emission (the
+/// `QOI_OP_RUN` field stores `run-1` in 6 bits, so the legal max per
+/// chunk is 62; tags 62 / 63 are stolen by the 8-bit RGB / RGBA
+/// tags). Returns `(next_pixel_index, out_pos)`.
+///
+/// The 16-byte (4-pixel) fixed-size block compare lowers to two
+/// word-width loads + compares — no per-pixel branching until the
+/// block straddling the run's end, which the scalar tail loop
+/// resolves. `#[inline(never)]` keeps this body out of the caller's
+/// per-pixel loop: runs amortise the call overhead over their whole
+/// length, while the caller's non-run fall-through path stays small
+/// enough to keep its chunk-priority chain in registers.
+#[inline(never)]
+fn run_scan_emit_rgba(
+    buf: &mut [u8],
+    mut out_pos: usize,
+    pixels: &[u8],
+    pixel_count: usize,
+    i: usize,
+    cur: [u8; 4],
+) -> (usize, usize) {
+    let pat: [u8; 16] = {
+        let mut p = [0u8; 16];
+        p[0..4].copy_from_slice(&cur);
+        p[4..8].copy_from_slice(&cur);
+        p[8..12].copy_from_slice(&cur);
+        p[12..16].copy_from_slice(&cur);
+        p
+    };
+    let mut j = i + 1;
+    while j + 4 <= pixel_count && pixels[j * 4..j * 4 + 16] == pat {
+        j += 4;
+    }
+    while j < pixel_count && pixels[j * 4..j * 4 + 4] == cur {
+        j += 1;
+    }
+
+    let mut n = j - i;
+    while n >= 62 {
+        buf[out_pos] = OP_RUN | 61;
+        out_pos += 1;
+        n -= 62;
+    }
+    if n > 0 {
+        buf[out_pos] = OP_RUN | (n as u8 - 1);
+        out_pos += 1;
+    }
+    (j, out_pos)
+}
+
+/// Round-282 run scan + emit (RGB layout). Same contract as
+/// [`run_scan_emit_rgba`]; RGB pixels are 3 bytes, so the block
+/// pattern is 12 bytes = 4 pixels (one word-width + one half-word
+/// compare per block). `cur[3]` is the fixed 0xff alpha and is not
+/// part of the input comparison.
+#[inline(never)]
+fn run_scan_emit_rgb(
+    buf: &mut [u8],
+    mut out_pos: usize,
+    pixels: &[u8],
+    pixel_count: usize,
+    i: usize,
+    cur: [u8; 4],
+) -> (usize, usize) {
+    let pat: [u8; 12] = {
+        let mut p = [0u8; 12];
+        p[0..3].copy_from_slice(&cur[..3]);
+        p[3..6].copy_from_slice(&cur[..3]);
+        p[6..9].copy_from_slice(&cur[..3]);
+        p[9..12].copy_from_slice(&cur[..3]);
+        p
+    };
+    let mut j = i + 1;
+    while j + 4 <= pixel_count && pixels[j * 3..j * 3 + 12] == pat {
+        j += 4;
+    }
+    while j < pixel_count && pixels[j * 3..j * 3 + 3] == cur[..3] {
+        j += 1;
+    }
+
+    let mut n = j - i;
+    while n >= 62 {
+        buf[out_pos] = OP_RUN | 61;
+        out_pos += 1;
+        n -= 62;
+    }
+    if n > 0 {
+        buf[out_pos] = OP_RUN | (n as u8 - 1);
+        out_pos += 1;
+    }
+    (j, out_pos)
 }
 
 // ---------------------------------------------------------------------------
