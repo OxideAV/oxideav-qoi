@@ -217,7 +217,7 @@ cargo run --release --example profile_qoi -- encode 5000
 
 ## Fuzzing
 
-Two [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
+Three [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
 live under `fuzz/`:
 
 * `decode` — feeds arbitrary bytes to `parse_qoi` and asserts the
@@ -232,10 +232,28 @@ live under `fuzz/`:
   contract must hold for every well-formed input — any drift between
   the encoder's chunk-selection priority chain (RUN > INDEX > DIFF >
   LUMA > RGB / RGBA) and the decoder's chunk walker breaks it.
+* `chunk_walk` (round 291) — a structure-aware target that keeps the
+  fuzzer past the header / magic / end-marker guards the `decode`
+  target spends most of its inputs on. The first 6 fuzz bytes pick a
+  *valid* header shape (width / height clamped to 1..=64, channels
+  ∈ {3, 4}, colorspace ∈ {0, 1}); the rest is fed verbatim as the raw
+  `QOI_OP_{RGB,RGBA,INDEX,DIFF,LUMA,RUN}` chunk stream between header
+  and end marker. Each input is decoded through `parse_qoi_into`
+  (twice, into a reused buffer, to exercise the `clear()` + regrow
+  amortised-allocation path), then walked through both `iter_ops` and
+  `iter_ops_strict`. Per-op invariants are asserted for every chunk:
+  `encoded_len() == 1 + body_len()`, `tag()` reconstructs the leading
+  on-wire byte, `Run` length stays in `1..=62`, and a `Truncated`
+  sentinel is always the iterator's final item. The two walkers are
+  cross-checked to agree (strict errors iff lazy saw a truncation).
+  This concentrates coverage feedback on the chunk dispatcher and op
+  accessors rather than the header validation the `decode` target
+  already saturates.
 
 ```sh
 cargo +nightly fuzz run decode
 cargo +nightly fuzz run encode_roundtrip
+cargo +nightly fuzz run chunk_walk
 ```
 
 The `decode` corpus is seeded from the byte-exact reference fixtures
@@ -249,10 +267,15 @@ oversized header is rejected as a truncated stream instead of
 crashing the process. The `encode_roundtrip` corpus is seeded with
 five small inputs covering RUN-heavy (solid 4×4 RGB), DIFF / LUMA
 (2×2 RGBA), INDEX (8×8 RGBA cycle), single-pixel, and a clamped
-max-dim gradient. A 30-second local smoke run reaches ~1,000
-exec/s with no crashes; the daily `fuzz.yml` workflow runs both
-targets through the org reusable `crate-fuzz.yml` for a 30-minute
-budget each.
+max-dim gradient. The `chunk_walk` corpus is seeded from the same
+reference `.qoi` fixtures (the synthesised-header wrapper re-derives
+its header from their leading bytes and treats the remainder as a
+chunk stream). A 90-second local run of `chunk_walk` reached
+980,619 executions at ~10.8k exec/s with zero crashes / OOMs /
+timeouts and no new artifacts; the older `decode` / `encode_roundtrip`
+smoke runs reach ~1,000 exec/s with no crashes. The daily `fuzz.yml`
+workflow runs every target through the org reusable `crate-fuzz.yml`
+for a 30-minute budget each.
 
 ## Property tests
 

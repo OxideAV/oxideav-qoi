@@ -35,6 +35,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- r291 `chunk_walk` fuzz target — structure-aware QOI_OP chunk
+  walker. Synthesises a valid 14-byte header + end marker from the
+  first 6 fuzz bytes and feeds the remainder as a raw chunk stream so
+  coverage feedback concentrates on the RGB / RGBA / INDEX / DIFF /
+  LUMA / RUN dispatch (and the mid-chunk truncation paths) rather than
+  the header guards the `decode` target already saturates. Drives
+  `parse_qoi_into` buffer reuse, both `iter_ops` / `iter_ops_strict`
+  walkers, and the per-op `tag()` / `body_len()` / `encoded_len()`
+  invariants. 90-second local run: 980,619 execs at ~10.8k exec/s,
+  zero crashes / OOMs / new artifacts.
 - r267 typed-primitive surface — qoi_hash + QoiOp introspection
 - drop release-plz.toml — use release-plz defaults across the workspace
 - stream-level QoiOp chunk iterator (r237)
