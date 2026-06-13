@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round-291 `chunk_walk` fuzz target — a structure-aware decoder
+  harness that synthesizes a spec-valid 14-byte header + trailing
+  8-byte end marker around the fuzzer's bytes and hands the result to
+  `parse_qoi` as the chunk stream. Because the synthesized header
+  always passes the field gate (magic, channels ∈ {3,4}, colorspace
+  ∈ {0,1}, non-zero dimensions clamped to 1..=64), the decoder reaches
+  the per-op walk on nearly every iteration, concentrating coverage on
+  the six chunk decode paths (`QOI_OP_RGB` / `RGBA` / `INDEX` / `DIFF`
+  / `LUMA` / `RUN`) and the truncation / overrun guards rather than
+  rediscovering the header. The only asserted contract is that the
+  decode call returns (`Ok` or `Err`, never a panic / abort / OOM).
+  Seeded with one named input per chunk type plus a truncated-stream
+  seed. A 90-second local run reached ~28.5M executions (~314k
+  exec/s), coverage saturated, zero crashes.
+
 ### Changed
 
 - Round-282 encoder run-arm restructure (profile-guided): when a

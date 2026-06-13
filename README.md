@@ -217,7 +217,7 @@ cargo run --release --example profile_qoi -- encode 5000
 
 ## Fuzzing
 
-Two [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
+Three [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
 live under `fuzz/`:
 
 * `decode` — feeds arbitrary bytes to `parse_qoi` and asserts the
@@ -232,10 +232,21 @@ live under `fuzz/`:
   contract must hold for every well-formed input — any drift between
   the encoder's chunk-selection priority chain (RUN > INDEX > DIFF >
   LUMA > RGB / RGBA) and the decoder's chunk walker breaks it.
+* `chunk_walk` — structure-aware decoder target. The first 6 fuzz
+  bytes pick a spec-valid header shape (width / height clamped to
+  1..=64, channels ∈ {3, 4}, colorspace ∈ {0, 1}); the rest become
+  the chunk stream, wrapped with a correct 14-byte header and a
+  trailing 8-byte end marker. Because the synthesized header always
+  passes the field gate, the decoder reaches the chunk walk on
+  (nearly) every iteration, concentrating coverage on the six per-op
+  decode paths (`QOI_OP_RGB` / `RGBA` / `INDEX` / `DIFF` / `LUMA` /
+  `RUN`) and the truncation / overrun guards between them. The only
+  contract asserted is that `parse_qoi` returns — never a panic.
 
 ```sh
 cargo +nightly fuzz run decode
 cargo +nightly fuzz run encode_roundtrip
+cargo +nightly fuzz run chunk_walk
 ```
 
 The `decode` corpus is seeded from the byte-exact reference fixtures
@@ -249,10 +260,12 @@ oversized header is rejected as a truncated stream instead of
 crashing the process. The `encode_roundtrip` corpus is seeded with
 five small inputs covering RUN-heavy (solid 4×4 RGB), DIFF / LUMA
 (2×2 RGBA), INDEX (8×8 RGBA cycle), single-pixel, and a clamped
-max-dim gradient. A 30-second local smoke run reaches ~1,000
-exec/s with no crashes; the daily `fuzz.yml` workflow runs both
-targets through the org reusable `crate-fuzz.yml` for a 30-minute
-budget each.
+max-dim gradient. The `chunk_walk` corpus carries one named seed per
+chunk type (RGB, RGBA, RUN, DIFF, LUMA, INDEX) plus a truncated-stream
+seed. A 90-second local run of `chunk_walk` reached ~28.5M executions
+(~314k exec/s) with coverage saturated and zero crashes; the daily
+`fuzz.yml` workflow runs all targets through the org reusable
+`crate-fuzz.yml` for a 30-minute budget each.
 
 ## Property tests
 
