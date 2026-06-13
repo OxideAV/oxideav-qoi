@@ -18,7 +18,7 @@ cargo-fuzz = true
 # walker (RGB / RGBA / INDEX / DIFF / LUMA / RUN + truncation) instead
 # of the header guards the `decode` target already saturates. The
 # targets cover those contracts independently — no external oracle is
-# pulled in (the clean-room wall bars `qoi.h` anyway).
+# pulled in; expectations come from the QOI spec only.
 [dependencies]
 libfuzzer-sys = "0.4"
 

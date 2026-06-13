@@ -31,9 +31,9 @@
 //! * [`qoi_hash`] over the op-derived pixel bytes, exercising the
 //!   running-array hash on attacker-chosen channel values.
 //!
-//! No external oracle is consulted — the clean-room wall bars the
-//! reference `qoi.h`; every expectation here comes from the QOI spec
-//! (`docs/image/qoi/`) and this crate's own documented op contracts.
+//! No external oracle is consulted — every expectation here comes
+//! from the QOI specification (`docs/image/qoi/`) and this crate's
+//! own documented op contracts.
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_qoi::{
