@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/OxideAV/oxideav-qoi/compare/v0.1.3...v0.1.4) - 2026-06-13
+
+### Other
+
+- scrub external-impl denial from chunk_walk doc comments
+- add structure-aware chunk_walk target (r291 depth)
+- run-arm wide scan-ahead (r282 profile round)
+
 ### Changed
 
 - Round-282 encoder run-arm restructure (profile-guided): when a
