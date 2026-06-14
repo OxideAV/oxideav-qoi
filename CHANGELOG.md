@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-298 `op_iter` fuzz target — a structure-aware harness for the
+  stream-level chunk iterator (`iter_ops` / `iter_ops_strict`), a decode
+  path distinct from `parse_qoi`: it walks the chunk stream into typed
+  `QoiOp`s without materialising a pixel buffer. Like `chunk_walk` it
+  synthesizes a spec-valid 14-byte header + trailing 8-byte end marker
+  around the fuzzer's bytes so the walker gets past the header gate on
+  nearly every iteration. Beyond "never panics", it asserts the
+  `encoded_len() == 1 + body_len()` width identity, that `tag()`
+  reconstructs the exact leading chunk byte for every non-truncated op,
+  exact consumed-byte accounting against the chunk-section length, and
+  that `iter_ops_strict` agrees with the non-strict walk on the
+  truncation boundary (`Ok` ⇔ no `Truncated`, else `Err`). Seeded with
+  one named input per chunk type plus mixed-op and truncated (RGB / LUMA)
+  seeds.
+
+### Fixed
+
+- `QoiOp::tag()` is now **total** over the public field space. The
+  variants carry `pub` fields, so a caller can construct an op whose
+  field falls outside the bit width the spec assigns it —
+  `Run { length: 0 }` (the `-1` run-length debias underflows),
+  `Diff { dr: i8::MAX, .. }` (the `+2` delta bias overflows `i8`), or
+  `Luma { dg: i8::MAX, .. }` (the `+32` bias overflows). Under a debug /
+  fuzz build (overflow checks on) the old plain arithmetic panicked
+  (`attempt to subtract / add with overflow`); the bias steps now use
+  `wrapping_add` / `wrapping_sub` and mask the result down to the tag's
+  field, so the method returns a well-defined byte instead of panicking.
+  Every in-spec value yields the identical tag as before, so the
+  iterator round-trip is unchanged. Found while building the `op_iter`
+  fuzz target; covered by the new `op_tag_is_total_over_extreme_fields`
+  unit test.
+
 - Round-291 `chunk_walk` fuzz target — a structure-aware decoder
   harness that synthesizes a spec-valid 14-byte header + trailing
   8-byte end marker around the fuzzer's bytes and hands the result to

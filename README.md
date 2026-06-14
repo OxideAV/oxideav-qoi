@@ -217,7 +217,7 @@ cargo run --release --example profile_qoi -- encode 5000
 
 ## Fuzzing
 
-Three [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
+Four [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
 live under `fuzz/`:
 
 * `decode` — feeds arbitrary bytes to `parse_qoi` and asserts the
@@ -242,11 +242,29 @@ live under `fuzz/`:
   decode paths (`QOI_OP_RGB` / `RGBA` / `INDEX` / `DIFF` / `LUMA` /
   `RUN`) and the truncation / overrun guards between them. The only
   contract asserted is that `parse_qoi` returns — never a panic.
+* `op_iter` — structure-aware harness for the *stream-level chunk
+  iterator* (`iter_ops` / `iter_ops_strict`), a decode path distinct
+  from `parse_qoi`: it walks the chunk stream into typed `QoiOp`s
+  without materialising a pixel buffer. Same header-synthesis trick as
+  `chunk_walk` (spec-valid 14-byte header + 8-byte end marker wrapped
+  around the fuzzer's chunk bytes) so the walker clears the header gate
+  on nearly every iteration. Beyond "never panics" it asserts the
+  `encoded_len() == 1 + body_len()` width identity, that `tag()`
+  reconstructs the exact leading chunk byte for every non-truncated op,
+  exact consumed-byte accounting against the chunk-section length, and
+  that `iter_ops_strict` agrees with the non-strict walk on the
+  truncation boundary. Building this target surfaced — and the round
+  fixed — a `QoiOp::tag()` overflow panic reachable via the type's
+  `pub` fields (`Run { length: 0 }` / `Diff { dr: i8::MAX, .. }` /
+  `Luma { dg: i8::MAX, .. }` overflowed the `-1` / `+2` / `+32` bias
+  steps under overflow checks); the bias arithmetic is now wrapping
+  and masked to the tag field, identical for every in-spec value.
 
 ```sh
 cargo +nightly fuzz run decode
 cargo +nightly fuzz run encode_roundtrip
 cargo +nightly fuzz run chunk_walk
+cargo +nightly fuzz run op_iter
 ```
 
 The `decode` corpus is seeded from the byte-exact reference fixtures
@@ -262,8 +280,11 @@ five small inputs covering RUN-heavy (solid 4×4 RGB), DIFF / LUMA
 (2×2 RGBA), INDEX (8×8 RGBA cycle), single-pixel, and a clamped
 max-dim gradient. The `chunk_walk` corpus carries one named seed per
 chunk type (RGB, RGBA, RUN, DIFF, LUMA, INDEX) plus a truncated-stream
-seed. A 90-second local run of `chunk_walk` reached ~28.5M executions
-(~314k exec/s) with coverage saturated and zero crashes; the daily
+seed. The `op_iter` corpus mirrors that one-seed-per-chunk-type set
+plus a mixed-op stream and two mid-chunk-truncation seeds (RGB body
+short, LUMA nibble missing). A 90-second local run of `chunk_walk`
+reached ~28.5M executions (~314k exec/s) with coverage saturated and
+zero crashes; the daily
 `fuzz.yml` workflow runs all targets through the org reusable
 `crate-fuzz.yml` for a 30-minute budget each.
 

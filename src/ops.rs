@@ -213,6 +213,16 @@ impl QoiOp {
     /// non-`Truncated` variant. It lets a chunk-shape histogram or a
     /// debug dumper recover the on-wire tag without re-encoding the
     /// whole chunk.
+    ///
+    /// The bias arithmetic (`+2` for `Diff`, `+32` for `Luma`, `-1` for
+    /// `Run`) is done with wrapping operators so the method is **total**
+    /// over the public field space: every field is masked down to the
+    /// bit width the spec assigns it (`& 0x03` / `& 0x3F`), so a field
+    /// carrying an out-of-spec value (the type allows it — the fields
+    /// are `pub`) yields a well-defined low-bit tag instead of panicking
+    /// on an overflowing add / subtract under a debug / fuzz build.
+    /// For every in-spec value the result is identical to the plain
+    /// arithmetic, so the iterator round-trip is unaffected.
     #[inline]
     pub fn tag(&self) -> u8 {
         match *self {
@@ -220,13 +230,13 @@ impl QoiOp {
             QoiOp::Rgba { .. } => OP_RGBA,
             QoiOp::Index { index } => OP_INDEX | (index & 0x3F),
             QoiOp::Diff { dr, dg, db } => {
-                let r = (dr + 2) as u8 & 0x03;
-                let g = (dg + 2) as u8 & 0x03;
-                let b = (db + 2) as u8 & 0x03;
+                let r = (dr as u8).wrapping_add(2) & 0x03;
+                let g = (dg as u8).wrapping_add(2) & 0x03;
+                let b = (db as u8).wrapping_add(2) & 0x03;
                 OP_DIFF | (r << 4) | (g << 2) | b
             }
-            QoiOp::Luma { dg, .. } => OP_LUMA | ((dg + 32) as u8 & 0x3F),
-            QoiOp::Run { length } => OP_RUN | ((length - 1) & 0x3F),
+            QoiOp::Luma { dg, .. } => OP_LUMA | ((dg as u8).wrapping_add(32) & 0x3F),
+            QoiOp::Run { length } => OP_RUN | (length.wrapping_sub(1) & 0x3F),
             QoiOp::Truncated { tag, .. } => tag,
         }
     }
@@ -864,5 +874,48 @@ mod tests {
         .is_truncated());
         assert!(!QoiOp::Run { length: 1 }.is_truncated());
         assert!(!QoiOp::Rgb { r: 0, g: 0, b: 0 }.is_truncated());
+    }
+
+    /// `tag()` must be **total** over the public field space. The
+    /// variants carry `pub` fields, so a caller can construct an op
+    /// whose field is outside the spec's bit width — `Run { length: 0 }`
+    /// (the `-1` bias underflows), `Diff { dr: 127, .. }` (the `+2` bias
+    /// overflows `i8`), `Luma { dg: 127, .. }` (the `+32` bias
+    /// overflows). Under a debug / fuzz build (overflow checks on) the
+    /// plain arithmetic would panic; the wrapping form must not, and
+    /// must still mask the result down to the tag's bit field.
+    #[test]
+    fn op_tag_is_total_over_extreme_fields() {
+        // Run { length: 0 } — the underflow case. Low 6 bits of
+        // 0u8.wrapping_sub(1) = 0xFF & 0x3F = 0x3F.
+        assert_eq!(QoiOp::Run { length: 0 }.tag(), OP_RUN | 0x3F);
+        // Run { length: u8::MAX }.
+        let _ = QoiOp::Run { length: u8::MAX }.tag();
+
+        // Diff with every channel at the i8 extremes — must not panic
+        // and must stay within the OP_DIFF tag space.
+        for dr in [i8::MIN, -1, 0, 1, i8::MAX] {
+            for dg in [i8::MIN, i8::MAX] {
+                for db in [i8::MIN, i8::MAX] {
+                    let t = QoiOp::Diff { dr, dg, db }.tag();
+                    assert_eq!(t & 0xC0, OP_DIFF, "Diff tag prefix");
+                }
+            }
+        }
+
+        // Luma dg at the i8 extremes — must not panic and stay in the
+        // OP_LUMA tag space.
+        for dg in [i8::MIN, -1, 0, 1, i8::MAX] {
+            let t = QoiOp::Luma {
+                dg,
+                dr_dg: i8::MAX,
+                db_dg: i8::MIN,
+            }
+            .tag();
+            assert_eq!(t & 0xC0, OP_LUMA, "Luma tag prefix");
+        }
+
+        // Index masks to 6 bits regardless of the high 2.
+        assert_eq!(QoiOp::Index { index: 0xFF }.tag(), OP_INDEX | 0x3F);
     }
 }

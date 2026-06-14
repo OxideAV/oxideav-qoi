@@ -3,7 +3,7 @@ name: Fuzz
 # Daily fuzz run for the cargo-fuzz harnesses under fuzz/. QOI is a
 # single-pass linear codec whose decode + encode paths are specified
 # entirely by the one-page qoiformat.org spec. The targets under fuzz/
-# (decode, encode_roundtrip, chunk_walk) each assert a panic-free /
+# (decode, encode_roundtrip, chunk_walk, op_iter) each assert a panic-free /
 # lossless contract derived from that spec; the reusable workflow
 # shares the 30-minute budget across them.
 

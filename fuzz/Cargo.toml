@@ -65,3 +65,19 @@ name = "chunk_walk"
 path = "fuzz_targets/chunk_walk.rs"
 test = false
 doc = false
+
+# Fourth target — structure-aware fuzz of the stream-level chunk
+# iterator (`iter_ops` / `iter_ops_strict`), a separate decode path from
+# `parse_qoi`: it walks chunks into typed `QoiOp`s without materialising
+# a pixel buffer. The first 6 fuzz bytes pick a spec-valid header shape;
+# the rest become the chunk stream wrapped with a correct 14-byte header
+# and 8-byte end marker. Asserts the walker returns / never panics, the
+# `encoded_len() == 1 + body_len()` width identity holds, `tag()` is
+# total and reconstructs the leading byte for every non-truncated op,
+# consumed-byte accounting is exact, and `iter_ops_strict` agrees with
+# the non-strict walk on the truncation boundary.
+[[bin]]
+name = "op_iter"
+path = "fuzz_targets/op_iter.rs"
+test = false
+doc = false
