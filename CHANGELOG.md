@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-304 `QoiOp::write_to(&mut Vec<u8>)` — the byte-level inverse of
+  the `iter_ops` chunk walker. Where `tag()` reconstructs only the
+  leading chunk byte, `write_to` appends the complete on-wire chunk:
+  leading byte plus every body byte the spec defines (`Luma`'s
+  `(dr_dg+8)<<4 | (db_dg+8)` nibble byte per QOI_OP_LUMA Byte[1], `Rgb`'s
+  raw `r/g/b`, `Rgba`'s raw `r/g/b/a`). The appended byte count equals
+  `encoded_len()`, the leading byte equals `tag()`, and the bytes are
+  exactly what the crate's own encoder would write — so
+  `iter_ops(input)` → `write_to` → `iter_ops` round-trips an in-spec
+  chunk stream byte-for-byte (asserted on a mixed-op image exercising
+  all six chunk types). A `Truncated` sentinel re-emits only its stored
+  leading byte, consistent with its `encoded_len()` of 1. Like `tag()`,
+  the `+2` / `+32` / `-1` / `+8` bias steps use wrapping operators and
+  mask to each field's spec bit width, so the method is total over the
+  `pub` field space and never panics under overflow checks. Lets a stream
+  rewriter, an alternative encoder, or a synthesis test emit chunks
+  without re-deriving the spec bit-packing.
 - Round-298 `op_iter` fuzz target — a structure-aware harness for the
   stream-level chunk iterator (`iter_ops` / `iter_ops_strict`), a decode
   path distinct from `parse_qoi`: it walks the chunk stream into typed

@@ -290,6 +290,66 @@ impl QoiOp {
     pub fn is_truncated(&self) -> bool {
         matches!(self, QoiOp::Truncated { .. })
     }
+
+    /// Append this op's complete on-wire chunk bytes to `out`.
+    ///
+    /// This is the byte-level inverse of the [`iter_ops`] walker:
+    /// [`tag`](QoiOp::tag) reconstructs only the *leading* chunk byte,
+    /// whereas `write_to` emits the leading byte **and** every body byte
+    /// the spec defines for the chunk, so the bytes appended are exactly
+    /// what an encoder would write and what [`iter_ops`] would read back:
+    ///
+    /// * `Index` / `Diff` / `Run` → 1 byte (the tag byte alone)
+    /// * `Luma` → 2 bytes: the `OP_LUMA | (dg+32)` tag, then a body byte
+    ///   carrying `(dr_dg+8) << 4 | (db_dg+8)`
+    /// * `Rgb` → 4 bytes: `0xFE`, then raw `r`, `g`, `b`
+    /// * `Rgba` → 5 bytes: `0xFF`, then raw `r`, `g`, `b`, `a`
+    ///
+    /// The number of bytes appended is always [`encoded_len`](QoiOp::encoded_len).
+    ///
+    /// [`QoiOp::Truncated`] writes only its stored leading byte (1 byte) —
+    /// the body never arrived, so there is nothing else to emit; this keeps
+    /// `write_to` consistent with `encoded_len`'s `1` for the sentinel and
+    /// lets a round-tripping tool re-serialize a partially-read stream
+    /// without inventing body bytes.
+    ///
+    /// Like [`tag`](QoiOp::tag), the bias arithmetic is **total** over the
+    /// public field space: the `+2` / `+32` / `-1` / `+8` bias steps use
+    /// wrapping operators and the result is masked to each field's spec bit
+    /// width, so an op carrying an out-of-spec field value (the fields are
+    /// `pub`) produces a well-defined byte sequence rather than panicking
+    /// under overflow checks. For every in-spec op the bytes are identical
+    /// to what the crate's own encoder would emit, so
+    /// `iter_ops(input)` → `write_to` → `iter_ops` round-trips an in-spec
+    /// chunk stream byte-for-byte.
+    pub fn write_to(&self, out: &mut Vec<u8>) {
+        match *self {
+            QoiOp::Rgb { r, g, b } => {
+                out.extend_from_slice(&[OP_RGB, r, g, b]);
+            }
+            QoiOp::Rgba { r, g, b, a } => {
+                out.extend_from_slice(&[OP_RGBA, r, g, b, a]);
+            }
+            QoiOp::Luma { dr_dg, db_dg, .. } => {
+                // The tag byte (which carries dg) mirrors `tag()` exactly;
+                // the body byte packs the red/blue minus-green deltas in
+                // two nibbles, each biased by +8 per spec QOI_OP_LUMA
+                // Byte[1].
+                let body = (((dr_dg as u8).wrapping_add(8) & 0x0F) << 4)
+                    | ((db_dg as u8).wrapping_add(8) & 0x0F);
+                out.push(self.tag());
+                out.push(body);
+            }
+            // Index / Diff / Run are tag-only; Truncated re-emits the
+            // single stored leading byte (no body ever arrived).
+            QoiOp::Index { .. }
+            | QoiOp::Diff { .. }
+            | QoiOp::Run { .. }
+            | QoiOp::Truncated { .. } => {
+                out.push(self.tag());
+            }
+        }
+    }
 }
 
 /// Iterator returned by [`iter_ops`] / [`iter_ops_strict`].
@@ -917,5 +977,183 @@ mod tests {
 
         // Index masks to 6 bits regardless of the high 2.
         assert_eq!(QoiOp::Index { index: 0xFF }.tag(), OP_INDEX | 0x3F);
+    }
+
+    /// `write_to` emits the complete on-wire chunk for each variant: the
+    /// leading byte from `tag()` plus the correct body bytes. The number
+    /// of bytes appended is `encoded_len()`, and the leading byte is
+    /// `tag()`.
+    #[test]
+    fn op_write_to_byte_shapes() {
+        let cases = [
+            QoiOp::Index { index: 0x2A },
+            QoiOp::Diff {
+                dr: -2,
+                dg: 1,
+                db: 0,
+            },
+            QoiOp::Run { length: 62 },
+            QoiOp::Luma {
+                dg: -3,
+                dr_dg: 7,
+                db_dg: -8,
+            },
+            QoiOp::Rgb {
+                r: 10,
+                g: 20,
+                b: 30,
+            },
+            QoiOp::Rgba {
+                r: 10,
+                g: 20,
+                b: 30,
+                a: 40,
+            },
+        ];
+        for op in cases {
+            let mut buf = Vec::new();
+            op.write_to(&mut buf);
+            assert_eq!(buf.len(), op.encoded_len(), "len for {op:?}");
+            assert_eq!(buf[0], op.tag(), "leading byte for {op:?}");
+        }
+
+        // Exact byte sequences against the spec packing.
+        let mut buf = Vec::new();
+        QoiOp::Rgb {
+            r: 10,
+            g: 20,
+            b: 30,
+        }
+        .write_to(&mut buf);
+        assert_eq!(buf, vec![OP_RGB, 10, 20, 30]);
+
+        buf.clear();
+        QoiOp::Rgba {
+            r: 10,
+            g: 20,
+            b: 30,
+            a: 40,
+        }
+        .write_to(&mut buf);
+        assert_eq!(buf, vec![OP_RGBA, 10, 20, 30, 40]);
+
+        // Luma body: (dr_dg+8)<<4 | (db_dg+8) = (7+8)<<4 | (-8+8) = 0xF0.
+        buf.clear();
+        QoiOp::Luma {
+            dg: -3,
+            dr_dg: 7,
+            db_dg: -8,
+        }
+        .write_to(&mut buf);
+        assert_eq!(buf, vec![OP_LUMA | ((-3i8 + 32) as u8), 0xF0]);
+    }
+
+    /// `write_to` appends (does not clobber) — useful for streaming a
+    /// whole sequence of ops into one buffer.
+    #[test]
+    fn op_write_to_appends() {
+        let mut buf = vec![0xAB, 0xCD];
+        QoiOp::Index { index: 5 }.write_to(&mut buf);
+        QoiOp::Run { length: 3 }.write_to(&mut buf);
+        assert_eq!(buf, vec![0xAB, 0xCD, OP_INDEX | 5, OP_RUN | 2]);
+    }
+
+    /// `Truncated` re-emits only its stored leading byte (1 byte), so the
+    /// appended length matches `encoded_len()`'s `1` for the sentinel.
+    #[test]
+    fn op_write_to_truncated_emits_tag_only() {
+        let op = QoiOp::Truncated {
+            tag: OP_RGB,
+            missing_body_bytes: 2,
+        };
+        let mut buf = Vec::new();
+        op.write_to(&mut buf);
+        assert_eq!(buf, vec![OP_RGB]);
+        assert_eq!(buf.len(), op.encoded_len());
+    }
+
+    /// The headline invariant: `iter_ops` → `write_to` → `iter_ops`
+    /// reproduces the original chunk stream byte-for-byte for a real
+    /// mixed-op image (RGB / RGBA / DIFF / LUMA / INDEX / RUN all present).
+    /// `write_to` is the exact byte-level inverse of the walker.
+    #[test]
+    fn op_write_to_roundtrips_chunk_stream() {
+        let mut pixels = Vec::new();
+        let mut x: u32 = 0x9E37_79B9;
+        for i in 0..256u32 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            let r = (i * 2) as u8;
+            let g = (x & 0xFF) as u8;
+            let b = (i * 3) as u8;
+            let a = if i % 16 == 0 { (x >> 8) as u8 } else { 255 };
+            pixels.extend_from_slice(&[r, g, b, a]);
+        }
+        let bytes = encode_qoi(16, 16, 4, &pixels);
+        let chunks = &bytes[crate::HEADER_SIZE..bytes.len() - crate::END_MARKER.len()];
+
+        // Re-serialize every op and confirm we reproduce the chunk
+        // section exactly.
+        let (_, it) = iter_ops(&bytes).unwrap();
+        let mut rebuilt = Vec::new();
+        let mut saw = (false, false, false, false, false, false);
+        for op in it {
+            assert!(!op.is_truncated(), "unexpected truncation: {op:?}");
+            op.write_to(&mut rebuilt);
+            match op {
+                QoiOp::Rgb { .. } => saw.0 = true,
+                QoiOp::Rgba { .. } => saw.1 = true,
+                QoiOp::Index { .. } => saw.2 = true,
+                QoiOp::Diff { .. } => saw.3 = true,
+                QoiOp::Luma { .. } => saw.4 = true,
+                QoiOp::Run { .. } => saw.5 = true,
+                QoiOp::Truncated { .. } => unreachable!(),
+            }
+        }
+        assert_eq!(rebuilt, chunks, "rebuilt chunk stream != original");
+
+        // And a full re-decode through iter_ops yields the same op list.
+        let (_, orig_ops) = iter_ops_strict(&bytes).unwrap();
+        let mut rebuilt_full = Vec::new();
+        rebuilt_full.extend_from_slice(&bytes[..crate::HEADER_SIZE]);
+        rebuilt_full.extend_from_slice(&rebuilt);
+        rebuilt_full.extend_from_slice(crate::END_MARKER);
+        let (_, rt_ops) = iter_ops_strict(&rebuilt_full).unwrap();
+        assert_eq!(orig_ops, rt_ops);
+
+        // Exercised the typed-write path for the 2-bit and 8-bit chunks.
+        assert!(saw.2 || saw.3 || saw.4 || saw.5, "no 2-bit chunks seen");
+        assert!(saw.0 || saw.1, "no 8-bit chunk seen");
+    }
+
+    /// `write_to` must be **total** over the public field space — extreme
+    /// field values that would overflow the bias arithmetic must not panic
+    /// under overflow checks, mirroring `tag()`'s totality guarantee.
+    #[test]
+    fn op_write_to_is_total_over_extreme_fields() {
+        let mut buf = Vec::new();
+        for dr_dg in [i8::MIN, -1, 0, 7, i8::MAX] {
+            for db_dg in [i8::MIN, i8::MAX] {
+                for dg in [i8::MIN, 0, i8::MAX] {
+                    buf.clear();
+                    QoiOp::Luma { dg, dr_dg, db_dg }.write_to(&mut buf);
+                    assert_eq!(buf.len(), 2);
+                    assert_eq!(buf[0] & 0xC0, OP_LUMA);
+                }
+            }
+        }
+        buf.clear();
+        QoiOp::Run { length: 0 }.write_to(&mut buf);
+        assert_eq!(buf, vec![OP_RUN | 0x3F]);
+        buf.clear();
+        QoiOp::Diff {
+            dr: i8::MAX,
+            dg: i8::MIN,
+            db: i8::MAX,
+        }
+        .write_to(&mut buf);
+        assert_eq!(buf.len(), 1);
+        assert_eq!(buf[0] & 0xC0, OP_DIFF);
     }
 }

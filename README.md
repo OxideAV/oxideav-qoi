@@ -101,6 +101,21 @@ chunk width (1/2/4/5), so summing `encoded_len()` over an `iter_ops`
 walk reproduces the chunk-section byte count; `is_truncated()` is a
 convenience predicate for the `Truncated` sentinel.
 
+`QoiOp::write_to(&mut Vec<u8>)` (round 304) is the byte-level inverse of
+the `iter_ops` walker: where `tag()` reconstructs only the leading chunk
+byte, `write_to` appends the full on-wire chunk — leading byte plus every
+body byte the spec defines (`Luma`'s `(dr_dg+8)<<4 | (db_dg+8)` nibble
+byte, `Rgb`'s raw `r/g/b`, `Rgba`'s raw `r/g/b/a`). The bytes appended
+equal `encoded_len()` and are exactly what an encoder would write, so
+`iter_ops(input)` → `write_to` → `iter_ops` round-trips an in-spec chunk
+stream byte-for-byte. A `Truncated` sentinel re-emits only its stored
+leading byte (consistent with its `encoded_len()` of 1). Like `tag()` the
+bias arithmetic is total over the `pub` field space — out-of-spec field
+values yield a well-defined byte sequence rather than panicking under
+overflow checks. This lets a stream rewriter, an alternative encoder
+experimenting with the running array, or a synthesis test emit chunks
+without re-deriving the spec bit-packing.
+
 `qoi_hash([r, g, b, a]) -> u8` (round 267) is the public typed form
 of the spec's running-pixel-array bucket selector
 `(R*3 + G*5 + B*7 + A*11) % 64`, with the multiply done in `u32` so
