@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/OxideAV/oxideav-qoi/compare/v0.1.3...v0.1.4) - 2026-06-14
+
+### Other
+
+- qoi r298: op_iter fuzz target + fix QoiOp::tag() overflow panic
+- structure-aware chunk_walk decoder target (r291 depth/fuzz)
+- run-arm wide scan-ahead (r282 profile round)
+
 ### Added
 
 - Round-298 `op_iter` fuzz target — a structure-aware harness for the
