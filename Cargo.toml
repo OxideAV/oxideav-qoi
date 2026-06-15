@@ -65,6 +65,16 @@ harness = false
 name = "reuse"
 harness = false
 
+# Round 318 (depth-mode bench): the streaming chunk-walk decode path
+# (`iter_ops` / `iter_ops_strict`) had fuzz + contract-test coverage
+# but no benchmark. This driver walks the chunk stream into typed
+# `QoiOp`s without materialising a pixel buffer, mirroring the `decode`
+# bench's five image shapes so an `op_walk` row lines up against the
+# matching `decode` row (op-dispatch cost vs. full pixel decode).
+[[bench]]
+name = "op_walk"
+harness = false
+
 # Round 175 (depth-mode profiling): flat measure-this-thing driver
 # for `samply` / `cargo flamegraph` / `perf record`. Mirrors the
 # `benches/*.rs` scenarios byte-for-byte so a profile capture

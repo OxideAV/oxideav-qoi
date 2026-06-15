@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-318 `benches/op_walk.rs` — a Criterion benchmark for the
+  streaming chunk-walk decode path (`iter_ops` / `iter_ops_strict`).
+  The existing `decode` / `encode` / `roundtrip` / `reuse` benches all
+  drive the pixel-materialising `parse_qoi` path. `iter_ops` is a
+  separate decode entry point that walks the chunk stream into typed
+  `QoiOp` values without materialising a pixel buffer, maintaining the
+  64-slot running array, or tracking the previous pixel — just per-byte
+  tag dispatch and bounds checks. It had fuzz coverage (`op_iter`) and
+  contract tests but no benchmark, so the bare op-dispatch cost (vs.
+  full decode) was not measurable. The new bench mirrors the `decode`
+  bench's five image shapes byte-for-byte (gradient RGBA / gradient
+  RGB24 / RUN-dominated solid / per-pixel-alpha RGBA / 8-colour INDEX
+  cycle) so an `op_walk` row lines up against the matching `decode` row.
+  Each shape runs two flavours: the allocation-free lazy `iter_ops`
+  walk (folding each op's `tag()` byte into an accumulator so the walk
+  isn't elided) and the eager `iter_ops_strict` variant that
+  materialises a `Vec<QoiOp>`, isolating the per-op `Vec` push/growth
+  cost. Measured on the local box, the RUN-dominated 512×512 solid
+  walks at ~112 GiB/s (a few thousand `Run` ops) while the mixed 320×240
+  RGBA gradient runs at ~870 MiB/s (per-pixel op dispatch), confirming
+  the bench separates the cheap RUN arm from the per-pixel arms. No
+  source-code change; benchmark-only addition.
+
 - Round-316 `tests/canonical_encoding.rs` — a deterministic
   canonical-encoding (chunk-minimality) property sweep. The existing
   `property_sweep.rs` invariants (lossless roundtrip, size bounds,

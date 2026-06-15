@@ -115,9 +115,13 @@ fixtures). Five scenarios cover the op-mix surface (natural-image RGBA
 gradient, RGB24 VGA gradient, single-colour RUN-dominated fill,
 per-pixel alpha-changing RGBA worst case, 8-colour INDEX cycle). A
 `reuse` bench A/Bs the `_into` surface against the allocating wrappers.
+An `op_walk` bench measures the streaming chunk-walk decode path
+(`iter_ops` / `iter_ops_strict`) — typed-`QoiOp` dispatch without
+materialising a pixel buffer — across the same five shapes, pairing the
+allocation-free lazy walk against the eager `Vec`-materialising variant.
 
 ```sh
-cargo bench -p oxideav-qoi --bench <decode|encode|roundtrip|reuse>
+cargo bench -p oxideav-qoi --bench <decode|encode|roundtrip|reuse|op_walk>
 ```
 
 ## Profiling
