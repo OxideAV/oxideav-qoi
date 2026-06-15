@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/OxideAV/oxideav-qoi/compare/v0.1.3...v0.1.4) - 2026-06-15
+
+### Other
+
+- add op_write target + write_to round-trip contract tests (r311)
+- add QoiOp::write_to — byte-level inverse of iter_ops chunk walker
+- qoi r298: op_iter fuzz target + fix QoiOp::tag() overflow panic
+- structure-aware chunk_walk decoder target (r291 depth/fuzz)
+- run-arm wide scan-ahead (r282 profile round)
+
 ### Added
 
 - Round-311 `op_write` fuzz target plus three in-tree contract tests for
