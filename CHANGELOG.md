@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round-316 `tests/canonical_encoding.rs` — a deterministic
+  canonical-encoding (chunk-minimality) property sweep. The existing
+  `property_sweep.rs` invariants (lossless roundtrip, size bounds,
+  header/end-marker echo, determinism, idempotent re-encode) all hold
+  for *any* decodable stream, so they cannot catch a regression where
+  the encoder picks a legal-but-oversized chunk (an `RGB` where a `DIFF`
+  fit, an `INDEX` where a `RUN` applied): such output still decodes
+  pixel-exact. The new sweep walks the encoder's output with `iter_ops`,
+  re-derives the decoder's running state (`prev` pixel + 64-slot index)
+  in lockstep, and asserts every emitted chunk is the highest-priority
+  legal choice on the spec ladder `RUN > INDEX > DIFF > LUMA >
+  RGB / RGBA`. It also pins the spec's two named canonical-form
+  constraints: intermediate runs are maxed at 62 (no split-short pair),
+  and no two consecutive `QOI_OP_INDEX` chunks resolve to the same slot.
+  Five input-shape generators (random / smooth / run-heavy / palette /
+  alpha-churn) × 200 seeds plus two hand-built edge-case streams, reusing
+  the inline xorshift32 PRNG (no `proptest` / `quickcheck` dev-dep). The
+  ladder was confirmed to have teeth by mutation: disabling the encoder's
+  DIFF arm makes the sweep fail with "LUMA chunk where a DIFF would have
+  fit".
+
 ## [0.1.4](https://github.com/OxideAV/oxideav-qoi/compare/v0.1.3...v0.1.4) - 2026-06-15
 
 ### Other

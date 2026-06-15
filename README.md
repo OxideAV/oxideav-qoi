@@ -186,6 +186,23 @@ reproducible (no `proptest` / `quickcheck` dev-dep).
 cargo test -p oxideav-qoi --test property_sweep
 ```
 
+`tests/canonical_encoding.rs` adds the complementary
+*chunk-minimality* class of invariant: the `property_sweep` checks all
+hold for any decodable stream, so they cannot catch the encoder picking
+a legal-but-oversized chunk (an `RGB` where a `DIFF` fit, an `INDEX`
+where a `RUN` applied) — that output still decodes pixel-exact. The
+canonical sweep walks the encoder's bytes with `iter_ops`, re-derives
+the decoder running state (`prev` pixel + 64-slot index) in lockstep,
+and asserts every emitted chunk is the highest-priority legal choice on
+the spec ladder (`RUN > INDEX > DIFF > LUMA > RGB / RGBA`). It also pins
+the spec's two named canonical-form rules: intermediate runs are maxed
+at 62, and no two consecutive `QOI_OP_INDEX` chunks resolve to the same
+slot. Same five generators × 200 seeds plus hand-built edge cases.
+
+```sh
+cargo test -p oxideav-qoi --test canonical_encoding
+```
+
 ## Standalone vs registry-integrated
 
 The default `registry` Cargo feature pulls in `oxideav-core` and
