@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-311 `op_write` fuzz target plus three in-tree contract tests for
+  `QoiOp::write_to`. The method is the byte-level inverse of the
+  `iter_ops` chunk walker (round 304) but had no fuzz coverage and only a
+  single hand-built mixed-op round-trip unit test. The structure-aware
+  `op_write` target reuses the `op_iter` header-synthesis trick (spec-valid
+  14-byte header + 8-byte end marker wrapped around the fuzzer's chunk
+  bytes), walks the stream with `iter_ops`, re-serializes every yielded op
+  via `write_to`, and asserts: each `write_to` appends exactly
+  `encoded_len()` bytes; a clean walk's rebuilt buffer equals the original
+  chunk section byte-for-byte and re-walks to the identical op sequence
+  (the `iter_ops` → `write_to` → `iter_ops` inverse property); and a
+  truncated walk's rebuilt buffer is a byte-prefix of the original (the
+  `Truncated` sentinel re-emits only its lone leading byte, dropping the
+  never-arrived body) that re-walks to the non-truncated op prefix. Seeded
+  with the same one-per-chunk-type + mixed + truncated corpus as `op_iter`.
+  Because the local ASAN fuzz toolchain isn't always available, the same
+  contract is also pinned by three deterministic unit tests
+  (`op_write_to_fuzz_contract_clean_streams`,
+  `op_write_to_fuzz_contract_truncated_streams`, and
+  `op_write_to_fuzz_contract_every_single_tag_byte`, the last sweeping all
+  256 possible leading tag bytes through the round-trip contract).
 - Round-304 `QoiOp::write_to(&mut Vec<u8>)` — the byte-level inverse of
   the `iter_ops` chunk walker. Where `tag()` reconstructs only the
   leading chunk byte, `write_to` appends the complete on-wire chunk:

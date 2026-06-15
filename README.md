@@ -232,7 +232,7 @@ cargo run --release --example profile_qoi -- encode 5000
 
 ## Fuzzing
 
-Four [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
+Five [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
 live under `fuzz/`:
 
 * `decode` — feeds arbitrary bytes to `parse_qoi` and asserts the
@@ -274,12 +274,25 @@ live under `fuzz/`:
   `Luma { dg: i8::MAX, .. }` overflowed the `-1` / `+2` / `+32` bias
   steps under overflow checks); the bias arithmetic is now wrapping
   and masked to the tag field, identical for every in-spec value.
+* `op_write` — structure-aware harness for `QoiOp::write_to`, the
+  byte-level inverse of the `iter_ops` walker (the only target that
+  exercises the serialize path). Same header-synthesis trick as
+  `op_iter` / `chunk_walk`. It walks the synthesized stream, re-serializes
+  each yielded op via `write_to`, and asserts each `write_to` appends
+  exactly `encoded_len()` bytes, a clean walk's rebuilt chunk section
+  equals the original byte-for-byte and re-walks to the identical op
+  sequence (the `iter_ops` → `write_to` → `iter_ops` round-trip identity),
+  and a truncated walk's rebuilt buffer is a byte-prefix of the original
+  (the `Truncated` sentinel re-emits only its lone leading byte). The same
+  contract is pinned by deterministic in-tree unit tests so the round-trip
+  logic stays CI-verified even where the ASAN fuzz toolchain isn't local.
 
 ```sh
 cargo +nightly fuzz run decode
 cargo +nightly fuzz run encode_roundtrip
 cargo +nightly fuzz run chunk_walk
 cargo +nightly fuzz run op_iter
+cargo +nightly fuzz run op_write
 ```
 
 The `decode` corpus is seeded from the byte-exact reference fixtures
@@ -297,7 +310,9 @@ max-dim gradient. The `chunk_walk` corpus carries one named seed per
 chunk type (RGB, RGBA, RUN, DIFF, LUMA, INDEX) plus a truncated-stream
 seed. The `op_iter` corpus mirrors that one-seed-per-chunk-type set
 plus a mixed-op stream and two mid-chunk-truncation seeds (RGB body
-short, LUMA nibble missing). A 90-second local run of `chunk_walk`
+short, LUMA nibble missing); the `op_write` corpus reuses that same set
+(the two targets share the 6-byte-header input shape). A 90-second local
+run of `chunk_walk`
 reached ~28.5M executions (~314k exec/s) with coverage saturated and
 zero crashes; the daily
 `fuzz.yml` workflow runs all targets through the org reusable

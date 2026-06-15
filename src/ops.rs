@@ -525,7 +525,7 @@ pub fn iter_ops_strict(input: &[u8]) -> Result<(QoiHeader, Vec<QoiOp>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{encode_qoi, encode_qoi_full};
+    use crate::{encode_qoi, encode_qoi_full, MAGIC};
 
     /// Solid run of identical pixels — encoder must emit one
     /// starter chunk for the first pixel (it can't open with a
@@ -1155,5 +1155,124 @@ mod tests {
         .write_to(&mut buf);
         assert_eq!(buf.len(), 1);
         assert_eq!(buf[0] & 0xC0, OP_DIFF);
+    }
+
+    /// Drive the exact contract the `op_write` fuzz target asserts, but as
+    /// a deterministic in-tree test so the round-trip logic is CI-verified
+    /// even where the ASAN fuzz toolchain isn't available locally.
+    ///
+    /// For an arbitrary chunk stream wrapped in a spec-valid header + end
+    /// marker, walking with `iter_ops` and re-serializing each op via
+    /// `write_to` must:
+    /// * append exactly `encoded_len()` bytes per op,
+    /// * on a clean walk, reproduce the chunk section byte-for-byte and
+    ///   re-walk to the identical op sequence,
+    /// * on a truncated walk, yield a rebuilt buffer that is a byte-prefix
+    ///   of the original (the `Truncated` sentinel re-emits only its lone
+    ///   leading byte) and re-walks to the non-truncated op prefix.
+    fn check_write_to_roundtrip(chunk_stream: &[u8]) {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(MAGIC);
+        buf.extend_from_slice(&1u32.to_be_bytes());
+        buf.extend_from_slice(&1u32.to_be_bytes());
+        buf.push(4);
+        buf.push(0);
+        buf.extend_from_slice(chunk_stream);
+        buf.extend_from_slice(END_MARKER);
+
+        let chunk_section = &buf[HEADER_SIZE..buf.len() - END_MARKER.len()];
+
+        let (_, it) = iter_ops(&buf).unwrap();
+        let mut rebuilt: Vec<u8> = Vec::new();
+        let mut non_truncated: Vec<QoiOp> = Vec::new();
+        let mut saw_truncated = false;
+        for op in it {
+            let before = rebuilt.len();
+            op.write_to(&mut rebuilt);
+            assert_eq!(rebuilt.len() - before, op.encoded_len(), "{op:?}");
+            if op.is_truncated() {
+                saw_truncated = true;
+                break;
+            }
+            non_truncated.push(op);
+        }
+
+        if !saw_truncated {
+            assert_eq!(rebuilt, chunk_section, "clean rebuilt != original");
+            let mut rebuilt_file = buf[..HEADER_SIZE].to_vec();
+            rebuilt_file.extend_from_slice(&rebuilt);
+            rebuilt_file.extend_from_slice(END_MARKER);
+            let (_, rt) = iter_ops_strict(&rebuilt_file).unwrap();
+            assert_eq!(rt, non_truncated, "clean re-walk op mismatch");
+        } else {
+            assert!(rebuilt.len() <= chunk_section.len());
+            assert_eq!(&rebuilt[..], &chunk_section[..rebuilt.len()], "prefix");
+            let mut rebuilt_file = buf[..HEADER_SIZE].to_vec();
+            rebuilt_file.extend_from_slice(&rebuilt);
+            rebuilt_file.extend_from_slice(END_MARKER);
+            let (_, it2) = iter_ops(&rebuilt_file).unwrap();
+            let mut rt: Vec<QoiOp> = Vec::new();
+            for op in it2 {
+                if op.is_truncated() {
+                    break;
+                }
+                rt.push(op);
+            }
+            assert_eq!(rt, non_truncated, "truncated re-walk op mismatch");
+        }
+    }
+
+    #[test]
+    fn op_write_to_fuzz_contract_clean_streams() {
+        // One chunk of each type, each fully present (clean walk).
+        check_write_to_roundtrip(&[OP_INDEX | 0x2A]); // Index
+        check_write_to_roundtrip(&[OP_DIFF | 0x0E]); // Diff
+        check_write_to_roundtrip(&[OP_RUN | 0x1F]); // Run
+        check_write_to_roundtrip(&[OP_LUMA | 0x20, 0x88]); // Luma (2-byte)
+        check_write_to_roundtrip(&[OP_RGB, 0x0A, 0x14, 0x1E]); // Rgb (4-byte)
+        check_write_to_roundtrip(&[OP_RGBA, 0x0A, 0x14, 0x1E, 0x28]); // Rgba
+                                                                      // Mixed multi-chunk stream exercising every arm in one walk.
+        check_write_to_roundtrip(&[
+            OP_RGBA,
+            1,
+            2,
+            3,
+            4,
+            OP_RGB,
+            5,
+            6,
+            7,
+            OP_INDEX | 0x05,
+            OP_DIFF | 0x15,
+            OP_LUMA | 0x10,
+            0x77,
+            OP_RUN | 0x03,
+        ]);
+        // Empty chunk section: zero ops, clean walk, empty rebuild.
+        check_write_to_roundtrip(&[]);
+    }
+
+    #[test]
+    fn op_write_to_fuzz_contract_truncated_streams() {
+        // LUMA tag with no body byte → Truncated (1 missing).
+        check_write_to_roundtrip(&[OP_LUMA | 0x20]);
+        // RGB tag with a short body → Truncated.
+        check_write_to_roundtrip(&[OP_RGB, 0x10, 0x20]);
+        // RGBA tag with a short body → Truncated.
+        check_write_to_roundtrip(&[OP_RGBA, 0x01]);
+        // A clean prefix then a truncated final chunk: the rebuilt buffer
+        // keeps the prefix intact and re-emits only the truncated tag byte.
+        check_write_to_roundtrip(&[OP_INDEX | 0x07, OP_RUN | 0x02, OP_RGB, 0xAA]);
+    }
+
+    #[test]
+    fn op_write_to_fuzz_contract_every_single_tag_byte() {
+        // Every possible leading tag byte as a lone chunk. Where a body is
+        // required (LUMA / RGB / RGBA) this truncates; the 2-bit tags (and
+        // RUN) decode cleanly. Confirms write_to never panics and the
+        // prefix/round-trip contract holds for the whole 0..=255 tag space.
+        for tag in 0u16..=255 {
+            check_write_to_roundtrip(&[tag as u8]);
+        }
     }
 }

@@ -81,3 +81,18 @@ name = "op_iter"
 path = "fuzz_targets/op_iter.rs"
 test = false
 doc = false
+
+# Fifth target — structure-aware fuzz of `QoiOp::write_to`, the byte-level
+# inverse of the `iter_ops` chunk walker. The first 6 fuzz bytes pick a
+# spec-valid header shape; the rest become the chunk stream wrapped with a
+# correct 14-byte header and 8-byte end marker. Each op the walker yields
+# is re-serialized via `write_to`; the target asserts each write appends
+# exactly `encoded_len()` bytes, a clean walk's rebuilt chunk section
+# equals the original byte-for-byte (and re-walks to the same op
+# sequence), and a truncated walk's rebuilt buffer is a byte-prefix of the
+# original (the `Truncated` sentinel re-emits only its lone leading byte).
+[[bin]]
+name = "op_write"
+path = "fuzz_targets/op_write.rs"
+test = false
+doc = false
