@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-323 `tests/decoder_boundary.rs` — hand-built decoder boundary
+  tests pinning the spec's *named worked examples* for channel
+  wraparound and the 8-bit tag-precedence rule. The existing
+  `property_sweep` / `canonical_encoding` suites only reach the
+  decoder's `QOI_OP_DIFF` / `QOI_OP_LUMA` wraparound arms through
+  random encode→decode (clamped pixels), so they never assert the
+  specific values the one-page spec calls out: `QOI_OP_DIFF`'s
+  "`1 - 2` will result in `255`" / "`255 + 1` will result in `0`",
+  and `QOI_OP_LUMA`'s "`10 - 13` will result in `253`" / "`250 + 7`
+  will result in `1`". The new tests assemble minimal QOI streams by
+  hand (header + one boundary chunk + end marker) and feed them
+  straight to `parse_qoi`, so a decoder regression is caught even if
+  the encoder shared the same bug (no encoder on the assertion path).
+  Also covers the 8-bit tag precedence boundary: `0xFE` / `0xFF` (whose
+  top two bits are `0b11`) must decode as a single `RGB` / `RGBA` pixel
+  and never as a `RUN`, and the largest legal `RUN` byte is `0xFD`
+  (length 62) — the next value up is the `RGB` tag. Ten tests total,
+  including a full sweep of every legal `DIFF` delta (−2..=1 per
+  channel) and the `LUMA` `dg` / `dr-dg` / `db-dg` range endpoints.
+  Test-only addition; no source change.
+
 - Round-318 `benches/op_walk.rs` — a Criterion benchmark for the
   streaming chunk-walk decode path (`iter_ops` / `iter_ops_strict`).
   The existing `decode` / `encode` / `roundtrip` / `reuse` benches all
