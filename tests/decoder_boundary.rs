@@ -29,12 +29,23 @@
 //!   are the `QOI_OP_RGB` / `QOI_OP_RGBA` 8-bit tags. "The 8-bit tags
 //!   have precedence over the 2-bit tags. A decoder must check for the
 //!   presence of an 8-bit tag first."
+//! * `QOI_OP_INDEX`: "A running `array[64]` (zero-initialized) of
+//!   previously seen pixel values is maintained." The crucial subtlety
+//!   the worked examples below pin: the index is zero-initialized to
+//!   `(0,0,0,0)` — alpha `0` — which is *distinct* from the spec's
+//!   initial previous pixel `(0,0,0,255)`. A decoder that mistakenly
+//!   seeds the 64-slot array with the initial `prev` would return alpha
+//!   `255` for an `INDEX` into an unwritten slot; the spec mandates
+//!   alpha `0`. Each emitted pixel "is put into this array at the
+//!   position formed by [the] hash function", so a slot only acquires a
+//!   non-zero value once a pixel has been emitted into it.
 //!
 //! No encoder is involved on the assertion path: these tests would
 //! catch a decoder regression even if the encoder shared the same bug.
 
 use oxideav_qoi::{
-    parse_qoi, QoiChannels, END_MARKER, MAGIC, OP_DIFF, OP_LUMA, OP_RGB, OP_RGBA, OP_RUN,
+    parse_qoi, qoi_hash, QoiChannels, END_MARKER, MAGIC, OP_DIFF, OP_INDEX, OP_LUMA, OP_RGB,
+    OP_RGBA, OP_RUN,
 };
 
 /// Assemble a minimal single-row RGBA QOI file: `qoif` header for a
@@ -271,4 +282,116 @@ fn run_length_one_decodes_single_pixel() {
     let img = parse_qoi(&bytes).expect("decode");
     assert_eq!(img.pixels.len(), 4, "RUN of 1 emits 1 pixel");
     assert_eq!(&img.pixels[0..4], &[0, 0, 0, 255]);
+}
+
+// ---------------------------------------------------------------------------
+// QOI_OP_INDEX — the running array is zero-initialized to (0,0,0,0),
+// which is NOT the initial previous pixel (0,0,0,255)
+// ---------------------------------------------------------------------------
+
+/// Build a `QOI_OP_INDEX` chunk byte referencing slot `idx` (0..=63).
+/// The 2-bit tag is `b00`, so the chunk byte is just the 6-bit index.
+fn index_chunk(idx: u8) -> u8 {
+    debug_assert!(idx < 64);
+    OP_INDEX | (idx & 0x3F)
+}
+
+#[test]
+fn index_into_unwritten_slot_yields_zero_alpha() {
+    // First chunk of the stream is an INDEX into slot 5, which has never
+    // been written. The spec's running array is "zero-initialized", so
+    // slot 5 holds (0,0,0,0) — alpha 0. A decoder that seeded the array
+    // with the initial prev (0,0,0,255) would wrongly return alpha 255.
+    let chunks = vec![index_chunk(5)];
+    let bytes = rgba_stream(1, &chunks);
+    let img = parse_qoi(&bytes).expect("decode");
+    assert_eq!(img.channels, QoiChannels::Rgba);
+    assert_eq!(
+        &img.pixels[0..4],
+        &[0, 0, 0, 0],
+        "INDEX into an unwritten slot must decode the zero-initialized \
+         (0,0,0,0) entry, NOT the initial prev (0,0,0,255)"
+    );
+}
+
+#[test]
+fn index_slot_zero_at_stream_start_is_zero_alpha() {
+    // The sharpest form of the trap: slot 0 is referenced by the chunk
+    // byte 0x00, and nothing has been emitted yet. It must decode to
+    // (0,0,0,0). This is exactly where an off-by-one initial-prev seed
+    // would surface alpha 255.
+    let chunks = vec![index_chunk(0)];
+    assert_eq!(chunks[0], 0x00, "INDEX slot 0 is the all-zero chunk byte");
+    let bytes = rgba_stream(1, &chunks);
+    let img = parse_qoi(&bytes).expect("decode");
+    assert_eq!(
+        &img.pixels[0..4],
+        &[0, 0, 0, 0],
+        "INDEX slot 0 at stream start is the zero-initialized entry"
+    );
+}
+
+#[test]
+fn index_slot_53_at_start_is_not_the_initial_prev() {
+    // The initial previous pixel (0,0,0,255) hashes to slot 53
+    // ((11 * 255) % 64 = 53). But the array is zero-initialized and the
+    // initial prev is NEVER pre-stored — a slot only acquires a value
+    // after a pixel is emitted into it. So an INDEX into slot 53 BEFORE
+    // any pixel has been emitted must still decode (0,0,0,0), not the
+    // initial prev. This pins that the decoder does not pre-seed
+    // index[hash(initial_prev)].
+    assert_eq!(
+        qoi_hash([0, 0, 0, 255]),
+        53,
+        "initial prev hashes to slot 53 (sanity for the trap below)"
+    );
+    let chunks = vec![index_chunk(53)];
+    let bytes = rgba_stream(1, &chunks);
+    let img = parse_qoi(&bytes).expect("decode");
+    assert_eq!(
+        &img.pixels[0..4],
+        &[0, 0, 0, 0],
+        "slot 53 is empty until the initial prev is actually emitted; \
+         an INDEX into it at stream start must yield (0,0,0,0)"
+    );
+}
+
+#[test]
+fn run_then_index_53_recalls_the_emitted_initial_prev() {
+    // Once the initial prev (0,0,0,255) is actually emitted — here via a
+    // 1-pixel RUN — the decoder stores it at index[hash] = index[53].
+    // A following INDEX into slot 53 then recalls the full (0,0,0,255),
+    // alpha included. Contrast with the previous test where slot 53 was
+    // still zero. This pins the store-on-emit half of the index contract
+    // through the decoder directly.
+    let chunks = vec![OP_RUN, index_chunk(53)]; // pixel0 = RUN(prev), pixel1 = INDEX 53
+    let bytes = rgba_stream(2, &chunks);
+    let img = parse_qoi(&bytes).expect("decode");
+    assert_eq!(&img.pixels[0..4], &[0, 0, 0, 255], "pixel 0 (RUN of prev)");
+    assert_eq!(
+        &img.pixels[4..8],
+        &[0, 0, 0, 255],
+        "pixel 1: INDEX 53 recalls the now-stored initial prev"
+    );
+}
+
+#[test]
+fn rgba_then_index_recalls_exact_stored_pixel() {
+    // Emit a fully-specified RGBA pixel, which the decoder stores at
+    // index[hash(pixel)]. A following INDEX into that exact slot must
+    // recall all four channels byte-exact. This drives the index
+    // store→recall path through the decoder with a non-trivial colour
+    // (so a wrong hash or a dropped channel would surface here).
+    let px = [17u8, 34, 51, 68];
+    let slot = qoi_hash(px);
+    let mut chunks = vec![OP_RGBA, px[0], px[1], px[2], px[3]];
+    chunks.push(index_chunk(slot)); // recall the pixel just stored
+    let bytes = rgba_stream(2, &chunks);
+    let img = parse_qoi(&bytes).expect("decode");
+    assert_eq!(&img.pixels[0..4], &px, "pixel 0 (RGBA)");
+    assert_eq!(
+        &img.pixels[4..8],
+        &px,
+        "pixel 1: INDEX into hash slot recalls the exact stored RGBA pixel"
+    );
 }

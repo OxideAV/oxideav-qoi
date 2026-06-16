@@ -207,6 +207,23 @@ slot. Same five generators × 200 seeds plus hand-built edge cases.
 cargo test -p oxideav-qoi --test canonical_encoding
 ```
 
+`tests/decoder_boundary.rs` pins the spec's *named worked examples* and
+init-state subtleties directly against the decoder — no encoder on the
+assertion path, so a shared encoder/decoder bug can't mask a regression.
+Hand-assembled single-chunk streams pin: the `QOI_OP_DIFF` wraparound
+(`1 - 2 = 255`, `255 + 1 = 0`) and full `-2..=1` delta sweep; the
+`QOI_OP_LUMA` wraparound (`10 - 13 = 253`, `250 + 7 = 1`) and `dg` /
+`dr-dg` / `db-dg` endpoint sweep; 8-bit-tag precedence (`0xfe` / `0xff`
+are never decoded as a `RUN`) and the `RUN` length ceiling of 62; and
+the running-array zero-initialisation — an `INDEX` into an unwritten
+slot decodes `(0,0,0,0)` (alpha 0), *distinct* from the initial previous
+pixel `(0,0,0,255)`, including the slot-53 trap where the initial prev's
+hash slot is still empty until a pixel is actually emitted into it.
+
+```sh
+cargo test -p oxideav-qoi --test decoder_boundary
+```
+
 ## Standalone vs registry-integrated
 
 The default `registry` Cargo feature pulls in `oxideav-core` and

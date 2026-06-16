@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-327 `tests/decoder_boundary.rs` — five hand-built decoder tests
+  pinning the `QOI_OP_INDEX` running-array zero-initialisation, a
+  spec subtlety not previously asserted against the decoder. The spec
+  maintains "a running `array[64]` (zero-initialized) of previously
+  seen pixel values"; that zero-initialised entry is `(0,0,0,0)` —
+  alpha `0` — which is *distinct* from the spec's initial previous
+  pixel `(0,0,0,255)`. The new tests assemble minimal streams by hand
+  and feed them to `parse_qoi`, asserting: an `INDEX` into an unwritten
+  slot decodes `(0,0,0,0)`; the slot-0 case (chunk byte `0x00`) decodes
+  `(0,0,0,0)`; the slot-53 trap (the initial prev's own hash slot) is
+  still `(0,0,0,0)` at stream start because the initial prev is never
+  pre-seeded into the array — a slot only acquires a value once a pixel
+  is actually emitted into it; once a `RUN` emits the initial prev, a
+  following `INDEX 53` recalls `(0,0,0,255)`; and an `INDEX` into the
+  hash slot of a stored `RGBA` pixel recalls all four channels
+  byte-exact. Complements the round-323 `DIFF` / `LUMA` / tag-precedence
+  boundary tests. Test-only addition; no source change.
+
 - Round-323 `tests/decoder_boundary.rs` — hand-built decoder boundary
   tests pinning the spec's *named worked examples* for channel
   wraparound and the 8-bit tag-precedence rule. The existing
