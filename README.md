@@ -227,6 +227,29 @@ hash slot is still empty until a pixel is actually emitted into it.
 cargo test -p oxideav-qoi --test decoder_boundary
 ```
 
+`tests/decoder_rejects.rs` is the complementary *negative* class: every
+other suite asserts that well-formed streams decode, but none feed the
+decoder a malformed stream and assert it is rejected. The spec mandates
+a precise set of structural well-formedness conditions; these tests pin
+each one directly against `parse_qoi` (no encoder on the assertion path).
+Covered rejections: bad / partial `qoif` magic (every byte position),
+input shorter than the 14-byte header, header-only input with no end
+marker, illegal `channels` (full u8 sweep — only 3 / 4 accepted),
+illegal `colorspace` (full u8 sweep — only 0 / 1 accepted), zero
+width / height / 0×0, wrong or truncated 8-byte end marker (every byte
+position), truncated `RGB` / `RGBA` / `LUMA` chunk bodies, a stream that
+ends before `width * height` pixels are covered, a `RUN` that overshoots
+the declared image size, a trailing chunk or stray byte after the image
+is complete, and the oversized-header guard (a 65536×65536 header with a
+one-pixel body is rejected as truncated rather than triggering a
+multi-gigabyte allocation). Each test also cross-checks that the cheap
+`parse_qoi_header` probe agrees on the header-level rejections while
+ignoring chunk-stream-level ones.
+
+```sh
+cargo test -p oxideav-qoi --test decoder_rejects
+```
+
 ## Standalone vs registry-integrated
 
 The default `registry` Cargo feature pulls in `oxideav-core` and

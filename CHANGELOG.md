@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-337 `tests/decoder_rejects.rs` — a *negative* decoder test
+  class pinning every spec-mandated structural rejection directly
+  against `parse_qoi`. The crate's other decoder-facing suites
+  (`decoder_boundary`, `property_sweep`, `canonical_encoding`,
+  `reference_fixtures`) all assert that *well-formed* streams decode;
+  none feed the decoder a *malformed* stream and assert it is rejected,
+  so a regression that silently accepted a truncated stream, a missing
+  end marker, or an illegal `channels` byte would pass every existing
+  test. The one-page spec mandates a precise set of well-formedness
+  conditions (14-byte `qoif` header with `channels` ∈ {3,4} and
+  `colorspace` ∈ {0,1}; "an image is complete when all pixels specified
+  by `width * height` have been covered"; "the byte stream's end is
+  marked with 7 `0x00` bytes followed by a single `0x01` byte"; fixed
+  chunk widths). The 22 new tests assemble minimal byte sequences that
+  each violate exactly one rule and assert an `Err(InvalidData)`: bad /
+  partial magic (every byte position), sub-header-length input,
+  header-only input with no end marker, illegal `channels` and
+  `colorspace` (full u8 sweeps), zero width / height / 0×0, wrong or
+  truncated end marker (every byte position), truncated `RGB` / `RGBA` /
+  `LUMA` chunk bodies, a stream ending before the image is complete, a
+  `RUN` overshooting the declared size, a trailing chunk or stray byte
+  after completion, and the oversized-header guard (a 65536×65536 header
+  with a one-pixel body is rejected as truncated, not OOM). Each test
+  also cross-checks that the cheap `parse_qoi_header` probe agrees on
+  the header-level rejections while (correctly) ignoring
+  chunk-stream-level ones. No encoder on the assertion path; no source
+  change; test-only addition.
+
 - Round-332 `benches/op_write.rs` — Criterion bench for the
   `QoiOp::write_to` chunk re-serialization path, the byte-level inverse
   of the `op_walk` chunk walker. `write_to` had `op_write` fuzz +
