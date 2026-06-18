@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-332 `benches/op_write.rs` — Criterion bench for the
+  `QoiOp::write_to` chunk re-serialization path, the byte-level inverse
+  of the `op_walk` chunk walker. `write_to` had `op_write` fuzz +
+  write-contract test coverage but no benchmark, so the per-op
+  tag/body emit cost was not measurable. The driver pre-collects the
+  op list per shape (via `iter_ops_strict`, outside the timed region),
+  then times re-emitting each op's complete on-wire chunk — pairing a
+  reused output buffer (steady-state, allocation-free) against a fresh
+  pre-reserved buffer (first-write growth folded in). Mirrors
+  `op_walk`'s five image shapes byte-for-byte so an `op_write` row
+  lines up against the matching `op_walk` row. No new public API; no
+  committed fixtures.
+
 - Round-327 `tests/decoder_boundary.rs` — five hand-built decoder tests
   pinning the `QOI_OP_INDEX` running-array zero-initialisation, a
   spec subtlety not previously asserted against the decoder. The spec

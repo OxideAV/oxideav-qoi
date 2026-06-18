@@ -119,9 +119,12 @@ An `op_walk` bench measures the streaming chunk-walk decode path
 (`iter_ops` / `iter_ops_strict`) — typed-`QoiOp` dispatch without
 materialising a pixel buffer — across the same five shapes, pairing the
 allocation-free lazy walk against the eager `Vec`-materialising variant.
+An `op_write` bench measures the inverse `QoiOp::write_to`
+re-serialization path (pre-collected ops re-emitted to bytes) on those
+same five shapes, pairing a reused output buffer against a fresh one.
 
 ```sh
-cargo bench -p oxideav-qoi --bench <decode|encode|roundtrip|reuse|op_walk>
+cargo bench -p oxideav-qoi --bench <decode|encode|roundtrip|reuse|op_walk|op_write>
 ```
 
 ## Profiling

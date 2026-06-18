@@ -75,6 +75,17 @@ harness = false
 name = "op_walk"
 harness = false
 
+# Round 332 (depth-mode bench): the chunk re-serialization path
+# (`QoiOp::write_to`) — the byte-level inverse of the `op_walk`
+# chunk walker — had `op_write` fuzz + write-contract test coverage
+# but no benchmark. This driver pre-collects the op list per shape,
+# then times re-emitting each op's on-wire chunk into a reused (and a
+# fresh) output buffer, mirroring `op_walk`'s five shapes so an
+# `op_write` row lines up against the matching `op_walk` row.
+[[bench]]
+name = "op_write"
+harness = false
+
 # Round 175 (depth-mode profiling): flat measure-this-thing driver
 # for `samply` / `cargo flamegraph` / `perf record`. Mirrors the
 # `benches/*.rs` scenarios byte-for-byte so a profile capture
