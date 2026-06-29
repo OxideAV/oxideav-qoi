@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/OxideAV/oxideav-qoi/compare/v0.1.4...v0.1.5) - 2026-06-29
+
+### Other
+
+- qoi r380: trait_decode fuzz target for the framework-side Decoder path
+- qoi r380: end-to-end Encoder->Packet->Decoder framework round-trip tests
+- qoi r380: typed QoiEncoderOptions + registered encoder-options schema
+- qoi r380: override Decoder::receive_arena_frame to emit a correct FrameHeader
+- qoi r380: override Decoder::reset to clear the eof latch — fix stuck-Eof after seek
+- qoi r380: trait-side Decoder/Encoder hardening — pts threading + colorspace knob + 23 behavioural tests
+- qoi r337: decoder_rejects negative test class for spec structural rejections
+- qoi r332: op_write bench for the QoiOp::write_to chunk re-serialization path
+- pin QOI_OP_INDEX running-array zero-init against the decoder (r327)
+- hand-built decoder boundary tests for DIFF/LUMA wraparound + tag precedence (r323)
+- qoi r318: op_walk bench for streaming chunk-walk decode path
+- qoi r316: canonical-encoding (chunk-minimality) property sweep
+- refresh to current status, drop per-round changelog cruft
+
 ### Fixed
 
 - Round-380 trait-side `Decoder::receive_arena_frame`: the
