@@ -45,6 +45,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-380 `fuzz/fuzz_targets/trait_decode.rs` — a sixth cargo-fuzz
+  target driving the framework-side `oxideav_core::Decoder` trait path,
+  distinct from the standalone `parse_qoi` the existing five targets
+  hit. A spec-valid header is synthesised around the fuzzer's chunk
+  bytes (same structure-aware scheme as `chunk_walk`) and fed to the
+  decoder as a `Packet`; both `receive_frame` (heap `VideoFrame`) and
+  `receive_arena_frame` (zero-copy arena `Frame`, the only decode-path
+  allocation logic the standalone targets never reach) are driven. The
+  target asserts neither path panics / aborts / OOMs and that, when
+  both succeed on the same stream, they agree on the decoded pixel
+  bytes, the plane stride, and the arena `FrameHeader`'s true
+  `(width, height, pixel_format)`. The `fuzz/` harness takes a direct
+  `oxideav-core` dependency (it is `publish = false`, not a library
+  consumer, so the workspace's no-cross-crate-dev-dep rule does not
+  apply). The daily `fuzz.yml` workflow auto-discovers the new target.
+
 - Round-380 end-to-end framework round-trip tests: three in-crate tests
   drive the *composed* trait path a real pipeline uses — encode a frame
   through the `oxideav_core::Encoder`, take the produced `Packet`,

@@ -142,7 +142,7 @@ cargo run --release --example profile_qoi -- encode 5000
 
 ## Fuzzing
 
-Five [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
+Six [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
 live under `fuzz/`:
 
 * `decode` — feeds arbitrary bytes to `parse_qoi`, asserting the
@@ -161,6 +161,15 @@ live under `fuzz/`:
 * `op_write` — structure-aware harness for `QoiOp::write_to`, asserting
   each `write_to` appends exactly `encoded_len()` bytes and the
   `iter_ops` → `write_to` → `iter_ops` round-trip identity.
+* `trait_decode` — structure-aware harness for the framework-side
+  `oxideav_core::Decoder` trait path (distinct from the standalone
+  `parse_qoi` the other decode targets hit): a spec-valid header is
+  synthesised around the fuzzer's chunk bytes, fed to the decoder as a
+  `Packet`, and both `receive_frame` (heap `VideoFrame`) and
+  `receive_arena_frame` (zero-copy arena `Frame`) are driven — asserting
+  neither panics and that, when both succeed, they agree on the decoded
+  pixel bytes, the plane stride, and the arena `FrameHeader`'s true
+  `(width, height, pixel_format)`.
 
 ```sh
 cargo +nightly fuzz run decode
@@ -168,6 +177,7 @@ cargo +nightly fuzz run encode_roundtrip
 cargo +nightly fuzz run chunk_walk
 cargo +nightly fuzz run op_iter
 cargo +nightly fuzz run op_write
+cargo +nightly fuzz run trait_decode
 ```
 
 The `decode` corpus is seeded from the byte-exact fixtures in

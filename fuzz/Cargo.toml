@@ -19,6 +19,13 @@ cargo-fuzz = true
 # per-op decode dispatch (RGB / RGBA / INDEX / DIFF / LUMA / RUN).
 [dependencies]
 libfuzzer-sys = "0.4"
+# The trait_decode target drives the framework-side Decoder trait
+# (send_packet / receive_frame / receive_arena_frame), so it names
+# oxideav_core types directly. This is a non-published fuzz harness
+# (publish = false), not a library consumer, so a direct framework dep
+# does not create the publish-lockstep coupling the workspace bans for
+# library dev-deps.
+oxideav-core = "0.1"
 
 [dependencies.oxideav-qoi]
 path = ".."
@@ -94,5 +101,21 @@ doc = false
 [[bin]]
 name = "op_write"
 path = "fuzz_targets/op_write.rs"
+test = false
+doc = false
+
+# Sixth target — structure-aware fuzz of the framework-side Decoder
+# trait path (oxideav_core::Decoder), distinct from the standalone
+# parse_qoi the other targets hit. The first 6 fuzz bytes pick a
+# spec-valid header shape; the rest become the chunk stream wrapped with
+# a correct header + end marker, fed to the decoder as a Packet. The
+# target drives BOTH receive_frame (heap VideoFrame) and
+# receive_arena_frame (zero-copy arena Frame with the QOI-overridden
+# FrameHeader), asserting neither panics / aborts / OOMs and that — when
+# both succeed on the same stream — they agree on the decoded pixel
+# bytes, the plane stride, and the frame dimensions.
+[[bin]]
+name = "trait_decode"
+path = "fuzz_targets/trait_decode.rs"
 test = false
 doc = false

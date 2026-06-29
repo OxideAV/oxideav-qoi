@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "oxideav-qoi"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "oxideav-core",
 ]
@@ -111,6 +111,7 @@ name = "oxideav-qoi-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "oxideav-core",
  "oxideav-qoi",
 ]
 
