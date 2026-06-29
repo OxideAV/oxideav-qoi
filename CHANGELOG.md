@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Round-380 trait-side `Decoder::receive_arena_frame`: the
+  `oxideav_core::Decoder` impl now overrides the zero-copy arena path to
+  emit a *correct* `FrameHeader`. The trait default infers the header
+  from plane shape — it labels a single-plane frame `Gray8` and reports
+  `width = plane[0].stride` — which for a packed RGB(A) QOI frame is
+  wrong on both counts (a 2×2 RGBA frame would report `width = 8`,
+  `pixel_format = Gray8`). The override carries the true `(width,
+  height, pixel_format)` (`Rgb24` / `Rgba`) and threads the packet
+  `pts`. The decoder now buffers the decoded image metadata (not just a
+  `VideoFrame`) so both `receive_frame` and `receive_arena_frame` build
+  accurate output from one decode.
+
 - Round-380 trait-side `Decoder::reset`: the `oxideav_core::Decoder`
   impl now overrides `reset()` to clear both the buffered frame and the
   end-of-stream latch. The trait default routes `reset()` through

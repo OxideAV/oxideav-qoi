@@ -23,7 +23,7 @@ use crate::{END_MARKER, HEADER_SIZE, MAGIC, OP_DIFF, OP_INDEX, OP_LUMA, OP_RGB, 
 #[cfg(feature = "registry")]
 use oxideav_core::Decoder;
 #[cfg(feature = "registry")]
-use oxideav_core::{CodecId, CodecParameters, Frame, Packet, VideoFrame, VideoPlane};
+use oxideav_core::{CodecId, CodecParameters, Frame, Packet, PixelFormat, VideoFrame, VideoPlane};
 
 // ---------------------------------------------------------------------------
 // Public standalone API
@@ -471,10 +471,28 @@ pub fn make_decoder(_params: &CodecParameters) -> oxideav_core::Result<Box<dyn D
     }))
 }
 
+/// A decoded QOI image buffered between `send_packet` and the matching
+/// `receive_frame` / `receive_arena_frame`. We keep the full metadata
+/// (not just a `VideoFrame`) so the arena path can emit a *correct*
+/// `FrameHeader` — the generic default `receive_arena_frame` would
+/// mislabel a packed RGB(A) plane as `Gray8` and report `width =
+/// stride` (= width × channels). Storing the true `(width, height,
+/// pixel_format)` lets us override the arena path with accurate values.
+#[cfg(feature = "registry")]
+struct PendingFrame {
+    width: u32,
+    height: u32,
+    pixel_format: PixelFormat,
+    /// `width * channels` — the byte stride of the single packed plane.
+    stride: usize,
+    pts: Option<i64>,
+    pixels: Vec<u8>,
+}
+
 #[cfg(feature = "registry")]
 struct QoiDecoder {
     codec_id: CodecId,
-    pending: Option<VideoFrame>,
+    pending: Option<PendingFrame>,
     eof: bool,
 }
 
@@ -485,20 +503,36 @@ impl Decoder for QoiDecoder {
     }
     fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
         let image = parse_qoi(&packet.data)?;
+        let pixel_format = match image.channels {
+            QoiChannels::Rgb => PixelFormat::Rgb24,
+            QoiChannels::Rgba => PixelFormat::Rgba,
+        };
+        let stride = image.width as usize * image.channels as usize;
         // QOI carries no timestamp of its own (the standalone
         // `parse_qoi` always yields `pts: None`). Thread the surrounding
         // `Packet`'s `pts` onto the produced frame so a muxer/player
         // downstream sees the presentation time the container assigned —
         // a `Packet` without a `pts` (`None`) still produces a frame with
         // `pts: None`, unchanged.
-        let mut frame = image_to_video_frame(image);
-        frame.pts = packet.pts;
-        self.pending = Some(frame);
+        self.pending = Some(PendingFrame {
+            width: image.width,
+            height: image.height,
+            pixel_format,
+            stride,
+            pts: packet.pts,
+            pixels: image.pixels,
+        });
         Ok(())
     }
     fn receive_frame(&mut self) -> oxideav_core::Result<Frame> {
         match self.pending.take() {
-            Some(f) => Ok(Frame::Video(f)),
+            Some(f) => Ok(Frame::Video(VideoFrame {
+                pts: f.pts,
+                planes: vec![VideoPlane {
+                    stride: f.stride,
+                    data: f.pixels,
+                }],
+            })),
             None => {
                 if self.eof {
                     Err(oxideav_core::Error::Eof)
@@ -507,6 +541,33 @@ impl Decoder for QoiDecoder {
                 }
             }
         }
+    }
+    fn receive_arena_frame(&mut self) -> oxideav_core::Result<oxideav_core::arena::sync::Frame> {
+        use oxideav_core::arena::sync::{ArenaPool, FrameHeader, FrameInner};
+        let f = match self.pending.take() {
+            Some(f) => f,
+            None => {
+                return if self.eof {
+                    Err(oxideav_core::Error::Eof)
+                } else {
+                    Err(oxideav_core::Error::NeedMore)
+                };
+            }
+        };
+        // QOI is a single packed plane. Build a one-shot arena sized to
+        // the pixels and emit a FrameHeader with the TRUE width / height
+        // / pixel format — unlike the trait-default `receive_arena_frame`
+        // which would label the packed RGB(A) plane `Gray8` and report
+        // `width = stride` (width × channels). The one-shot pool drops at
+        // end of scope; the returned Frame keeps its leased buffer alive
+        // via the Arc<FrameInner>.
+        let total_bytes = f.pixels.len();
+        let pool = ArenaPool::with_alloc_count_cap(1, total_bytes.max(1), 4);
+        let arena = pool.lease()?;
+        let dst = arena.alloc::<u8>(total_bytes)?;
+        dst.copy_from_slice(&f.pixels);
+        let header = FrameHeader::new(f.width, f.height, f.pixel_format, f.pts);
+        FrameInner::new(arena, &[(0, total_bytes)], header)
     }
     fn flush(&mut self) -> oxideav_core::Result<()> {
         self.eof = true;
@@ -526,18 +587,6 @@ impl Decoder for QoiDecoder {
         self.pending = None;
         self.eof = false;
         Ok(())
-    }
-}
-
-#[cfg(feature = "registry")]
-fn image_to_video_frame(image: QoiImage) -> VideoFrame {
-    let stride = image.width as usize * image.channels as usize;
-    VideoFrame {
-        pts: image.pts,
-        planes: vec![VideoPlane {
-            stride,
-            data: image.pixels,
-        }],
     }
 }
 
@@ -781,6 +830,78 @@ mod registry_decoder_tests {
         match dec.receive_frame() {
             Err(Error::NeedMore) => {}
             other => panic!("expected NeedMore after reset drops the pending frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arena_frame_carries_true_width_height_and_pixel_format_rgba() {
+        // The QOI override of receive_arena_frame must emit a correct
+        // FrameHeader. The trait DEFAULT would label the single packed
+        // plane Gray8 and report width = stride (= width*4 = 8). We pin
+        // the corrected values.
+        use oxideav_core::PixelFormat;
+        let (bytes, pixels) = sample_rgba_qoi(); // 2x2 RGBA
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("make_decoder");
+        dec.send_packet(&packet_with(bytes, Some(11)))
+            .expect("send_packet");
+        let frame = match dec.receive_arena_frame() {
+            Ok(f) => f,
+            Err(e) => panic!("receive_arena_frame failed: {e:?}"),
+        };
+        let hdr = frame.header();
+        assert_eq!(hdr.width, 2, "true pixel width, NOT the byte stride");
+        assert_eq!(hdr.height, 2);
+        assert_eq!(
+            hdr.pixel_format,
+            PixelFormat::Rgba,
+            "packed RGBA, not Gray8"
+        );
+        assert_eq!(hdr.presentation_timestamp, Some(11), "pts threaded");
+        assert_eq!(frame.plane_count(), 1, "QOI is one packed plane");
+        assert_eq!(frame.plane(0), Some(pixels.as_slice()), "lossless pixels");
+    }
+
+    #[test]
+    fn arena_frame_rgb_pixel_format() {
+        use oxideav_core::PixelFormat;
+        let pixels: Vec<u8> = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
+        let bytes = crate::encode_qoi(2, 2, 3, &pixels);
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("make_decoder");
+        dec.send_packet(&packet_with(bytes, None))
+            .expect("send_packet");
+        let frame = match dec.receive_arena_frame() {
+            Ok(f) => f,
+            Err(e) => panic!("receive_arena_frame failed: {e:?}"),
+        };
+        let hdr = frame.header();
+        assert_eq!(hdr.width, 2);
+        assert_eq!(hdr.height, 2);
+        assert_eq!(hdr.pixel_format, PixelFormat::Rgb24, "packed RGB24");
+        assert_eq!(frame.plane(0), Some(pixels.as_slice()));
+    }
+
+    #[test]
+    fn arena_frame_before_packet_is_need_more() {
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("make_decoder");
+        match dec.receive_arena_frame() {
+            Err(Error::NeedMore) => {}
+            Err(e) => panic!("expected NeedMore before any packet, got Err({e:?})"),
+            Ok(_) => panic!("expected NeedMore before any packet, got Ok(frame)"),
+        }
+    }
+
+    #[test]
+    fn arena_frame_after_flush_is_eof() {
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("make_decoder");
+        dec.flush().expect("flush");
+        match dec.receive_arena_frame() {
+            Err(Error::Eof) => {}
+            Err(e) => panic!("expected Eof after flush, got Err({e:?})"),
+            Ok(_) => panic!("expected Eof after flush, got Ok(frame)"),
         }
     }
 }

@@ -265,8 +265,11 @@ The trait-side `Decoder` threads the surrounding `Packet`'s `pts` onto
 each produced `VideoFrame` (a `pts`-less packet yields a `pts`-less
 frame) and overrides `reset()` so a decoder reused after a container
 seek returns to an awaiting-input (`NeedMore`) state rather than the
-stuck `Eof` the trait default would leave behind. The trait-side
-`Encoder` honours an optional `colorspace`
+stuck `Eof` the trait default would leave behind. It also overrides the
+zero-copy `receive_arena_frame` path so the arena `FrameHeader` carries
+the true `(width, height, pixel_format)` (`Rgb24` / `Rgba`) — the trait
+default would mislabel a packed RGB(A) plane as `Gray8` with `width =
+stride`. The trait-side `Encoder` honours an optional `colorspace`
 tuning knob on `CodecParameters::options` — `"0"`/`"srgb"` (sRGB with
 linear alpha) or `"1"`/`"linear"` (all channels linear), default `0`,
 any other value rejected at construction — and echoes the resolved
