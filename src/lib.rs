@@ -102,6 +102,8 @@ pub const OP_LUMA: u8 = 0x80;
 pub const OP_RUN: u8 = 0xC0;
 
 pub use decoder::{parse_qoi, parse_qoi_header, parse_qoi_into};
+#[cfg(feature = "registry")]
+pub use encoder::QoiEncoderOptions;
 pub use encoder::{encode_qoi, encode_qoi_full, encode_qoi_full_into, encode_qoi_into};
 pub use error::{QoiError, Result};
 pub use image::{QoiChannels, QoiColorspace, QoiHeader, QoiImage};

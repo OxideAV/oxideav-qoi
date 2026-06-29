@@ -53,7 +53,11 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
         CodecInfo::new(CodecId::new(crate::CODEC_ID_STR))
             .capabilities(caps)
             .decoder(crate::decoder::make_decoder)
-            .encoder(crate::encoder::make_encoder),
+            .encoder(crate::encoder::make_encoder)
+            // Declare the encoder's recognised option keys (just
+            // `colorspace`) so `oxideav list` / pipeline JSON validation
+            // can discover and check them.
+            .encoder_options::<crate::encoder::QoiEncoderOptions>(),
     );
 }
 
@@ -106,6 +110,23 @@ mod tests {
             ctx.containers.container_for_extension("qoi"),
             Some("qoi"),
             "register(ctx) should install .qoi extension hint"
+        );
+    }
+
+    #[test]
+    fn encoder_options_schema_is_discoverable_through_the_registry() {
+        // The colorspace knob must be reachable via the registry's
+        // schema lookup so `oxideav list` / pipeline JSON validation can
+        // discover and check it.
+        let mut reg = CodecRegistry::new();
+        register_codecs(&mut reg);
+        let id = CodecId::new(crate::CODEC_ID_STR);
+        let schema = reg
+            .encoder_options_schema(&id)
+            .expect("QOI encoder should expose an options schema");
+        assert!(
+            schema.iter().any(|f| f.name == "colorspace"),
+            "schema must list the colorspace option"
         );
     }
 }

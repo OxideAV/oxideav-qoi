@@ -45,6 +45,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-380 typed `QoiEncoderOptions` + registered schema: the
+  `colorspace` encoder knob is now backed by a framework
+  `CodecOptionsStruct` (an `Enum(["0","srgb","1","linear"])` schema)
+  registered via `CodecInfo::encoder_options`. `make_encoder` resolves
+  the option through the schema-validated `oxideav_core::parse_options`
+  path, so an unknown option key is now a hard `InvalidData` error
+  (previously silently ignored) and the knob is discoverable through
+  `CodecRegistry::encoder_options_schema` for `oxideav list` / pipeline
+  JSON validation. `QoiEncoderOptions` is re-exported from the crate
+  root (registry feature only).
+
 - Round-380 trait-side `Encoder` colorspace knob: the
   `oxideav_core::Encoder` impl now reads an optional `colorspace`
   tuning option from `CodecParameters::options` and writes it into the

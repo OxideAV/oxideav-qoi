@@ -553,31 +553,80 @@ pub fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn En
     }))
 }
 
+/// Typed encoder options for QOI.
+///
+/// The framework's [`CodecOptionsStruct`] surface — declaring a static
+/// `SCHEMA` and registering it via `CodecInfo::encoder_options` — is
+/// what makes a codec's tuning knobs discoverable to `oxideav list`,
+/// validatable by the pipeline's JSON-options checker, and parsed with
+/// uniform error messages. QOI's only knob is the informational
+/// `colorspace` header byte.
+///
+/// The `colorspace` option accepts the numeric forms `"0"` / `"1"` and
+/// the symbolic names `"srgb"` (= 0, sRGB with linear alpha) and
+/// `"linear"` (= 1, all channels linear). Unknown keys and out-of-set
+/// values are rejected by [`parse_options`] before this struct's
+/// `apply` runs; absent → the default `0`.
+#[cfg(feature = "registry")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct QoiEncoderOptions {
+    /// Resolved QOI colorspace header byte (0 or 1). Defaults to 0
+    /// (sRGB with linear alpha), matching the standalone [`encode_qoi`].
+    pub colorspace: u8,
+}
+
+#[cfg(feature = "registry")]
+impl oxideav_core::CodecOptionsStruct for QoiEncoderOptions {
+    const SCHEMA: &'static [oxideav_core::OptionField] = &[oxideav_core::OptionField {
+        name: "colorspace",
+        // Accept both the numeric and the symbolic spellings; the Enum
+        // kind validates the value against this exact set in
+        // `parse_options` before `apply` is called.
+        kind: oxideav_core::OptionKind::Enum(&["0", "srgb", "1", "linear"]),
+        default: oxideav_core::OptionValue::String(String::new()),
+        help: "QOI colorspace header byte: 0/\"srgb\" (sRGB with linear \
+               alpha) or 1/\"linear\" (all channels linear). Informational \
+               only — does not change pixel bytes.",
+    }];
+
+    fn apply(&mut self, key: &str, value: &oxideav_core::OptionValue) -> oxideav_core::Result<()> {
+        match key {
+            "colorspace" => {
+                self.colorspace = match value.as_str()? {
+                    "0" | "srgb" => 0,
+                    "1" | "linear" => 1,
+                    // Unreachable in practice: the Enum schema already
+                    // restricts the value set. Kept as a defensive arm.
+                    other => {
+                        return Err(oxideav_core::Error::invalid(format!(
+                            "QOI encoder: invalid colorspace {other:?}"
+                        )))
+                    }
+                };
+                Ok(())
+            }
+            // Unreachable: parse_options rejects unknown keys against
+            // SCHEMA before apply runs.
+            other => Err(oxideav_core::Error::invalid(format!(
+                "QOI encoder: unknown option {other:?}"
+            ))),
+        }
+    }
+}
+
 /// Read the optional `colorspace` tuning knob from
 /// [`CodecParameters::options`] and resolve it to the on-wire QOI
 /// header byte (0 = sRGB with linear alpha, 1 = all channels linear).
 ///
-/// The option is purely informational per the QOI spec — it never
-/// changes the encoded chunk bytes, only the single header byte at
-/// offset 13. Absent option → default 0 (sRGB with linear alpha), the
-/// same default the standalone [`encode_qoi`] uses.
-///
-/// Accepts the numeric forms `"0"` / `"1"` and the symbolic names
-/// `"srgb"` (= 0) and `"linear"` (= 1) so callers can spell the hint
-/// either way. Any other value is a caller error and is rejected with
-/// `Error::invalid` rather than silently coerced — a malformed knob
-/// should surface at encoder construction, not be papered over.
+/// Goes through the framework's schema-validated [`parse_options`] path
+/// against [`QoiEncoderOptions`], so an unknown option key or an
+/// out-of-set value is rejected with a uniform `InvalidData` error at
+/// encoder construction rather than silently ignored. Absent option →
+/// default 0, matching the standalone [`encode_qoi`].
 #[cfg(feature = "registry")]
 fn resolve_colorspace_option(params: &CodecParameters) -> oxideav_core::Result<u8> {
-    match params.options.get("colorspace") {
-        None => Ok(0),
-        Some("0") | Some("srgb") => Ok(0),
-        Some("1") | Some("linear") => Ok(1),
-        Some(other) => Err(oxideav_core::Error::invalid(format!(
-            "QOI encoder: invalid colorspace option {other:?} \
-             (expected \"0\"/\"srgb\" or \"1\"/\"linear\")"
-        ))),
-    }
+    let opts: QoiEncoderOptions = oxideav_core::parse_options(&params.options)?;
+    Ok(opts.colorspace)
 }
 
 #[cfg(feature = "registry")]
@@ -810,6 +859,45 @@ mod registry_encoder_tests {
             Ok(_) => panic!("bogus colorspace must be rejected"),
             Err(other) => panic!("expected InvalidData, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn unknown_option_key_is_rejected_at_construction() {
+        // Going through the schema-validated parse_options path means an
+        // unrecognised key is a hard error, not silently ignored.
+        let mut p = params(2, 2, PixelFormat::Rgba);
+        p.options = CodecOptions::new().set("quality", "9");
+        match make_encoder(&p) {
+            Err(Error::InvalidData(_)) => {}
+            Ok(_) => panic!("unknown option key must be rejected"),
+            Err(other) => panic!("expected InvalidData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn options_schema_lists_colorspace() {
+        use oxideav_core::{CodecOptionsStruct, OptionKind};
+        let schema = QoiEncoderOptions::SCHEMA;
+        assert_eq!(schema.len(), 1, "QOI has exactly one encoder option");
+        let f = &schema[0];
+        assert_eq!(f.name, "colorspace");
+        match f.kind {
+            OptionKind::Enum(vals) => {
+                assert!(vals.contains(&"srgb"));
+                assert!(vals.contains(&"linear"));
+                assert!(vals.contains(&"0"));
+                assert!(vals.contains(&"1"));
+            }
+            other => panic!("colorspace should be an Enum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_options_default_is_colorspace_zero() {
+        use oxideav_core::parse_options;
+        let opts: QoiEncoderOptions = parse_options(&CodecOptions::new()).expect("empty parses");
+        assert_eq!(opts.colorspace, 0);
+        assert_eq!(opts, QoiEncoderOptions::default());
     }
 
     #[test]

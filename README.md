@@ -272,8 +272,12 @@ default would mislabel a packed RGB(A) plane as `Gray8` with `width =
 stride`. The trait-side `Encoder` honours an optional `colorspace`
 tuning knob on `CodecParameters::options` — `"0"`/`"srgb"` (sRGB with
 linear alpha) or `"1"`/`"linear"` (all channels linear), default `0`,
-any other value rejected at construction — and echoes the resolved
-value back through `output_params().options`. The encoder repacks a
+any other value (and any unknown option key) rejected at construction —
+and echoes the resolved value back through `output_params().options`.
+The knob is backed by a typed `QoiEncoderOptions` (an `Enum` schema
+registered via `CodecInfo::encoder_options`), so it is discoverable
+through `CodecRegistry::encoder_options_schema` for `oxideav list` /
+pipeline JSON validation. The encoder repacks a
 padded source plane (`stride > width * channels`) to QOI's
 tightly-packed layout, marks every output packet as a keyframe (QOI is
 intra-only), and rejects empty / truncated planes, non-video frames,
