@@ -45,6 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-380 end-to-end framework round-trip tests: three in-crate tests
+  drive the *composed* trait path a real pipeline uses — encode a frame
+  through the `oxideav_core::Encoder`, take the produced `Packet`,
+  decode it back through the `Decoder`, and assert the recovered
+  `VideoFrame` is pixel-exact (RGBA and RGB) and that a `colorspace`
+  knob set on the encoder survives to the decoded header byte. The
+  isolated send/receive suites cover each half; these pin the seam
+  between them.
+
 - Round-380 typed `QoiEncoderOptions` + registered schema: the
   `colorspace` encoder knob is now backed by a framework
   `CodecOptionsStruct` (an `Enum(["0","srgb","1","linear"])` schema)

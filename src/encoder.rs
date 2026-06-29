@@ -991,4 +991,74 @@ mod registry_encoder_tests {
             .expect_err("audio is not a QOI frame");
         assert!(matches!(err, Error::InvalidData(_)), "got {err:?}");
     }
+
+    // ── End-to-end framework round-trip (Encoder → Packet → Decoder) ──
+    //
+    // The two trait halves are tested in isolation above; these pin the
+    // *composed* path a real pipeline drives — encode a frame, take the
+    // produced packet, decode it back — proving the colorspace knob and
+    // pixel layout survive a full framework round-trip.
+
+    /// Encode a frame through the trait Encoder, then decode the produced
+    /// packet through the trait Decoder. Returns the recovered VideoFrame.
+    fn trait_roundtrip(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        colorspace_opt: Option<&str>,
+        pixels: Vec<u8>,
+    ) -> (oxideav_core::VideoFrame, Vec<u8>) {
+        let mut p = params(width, height, format);
+        if let Some(cs) = colorspace_opt {
+            p.options = CodecOptions::new().set("colorspace", cs);
+        }
+        let mut enc = make_encoder(&p).expect("make_encoder");
+        let channels = match format {
+            PixelFormat::Rgba => 4,
+            PixelFormat::Rgb24 => 3,
+            other => panic!("unexpected format {other:?}"),
+        };
+        enc.send_frame(&video_frame(width as usize * channels, pixels))
+            .expect("send_frame");
+        let pkt = enc.receive_packet().expect("receive_packet");
+        let packet_bytes = pkt.data.clone();
+
+        let mut dec =
+            crate::decoder::make_decoder(&params(width, height, format)).expect("make_decoder");
+        dec.send_packet(&pkt).expect("send_packet");
+        let Frame::Video(vf) = dec.receive_frame().expect("receive_frame") else {
+            panic!("expected a video frame");
+        };
+        (vf, packet_bytes)
+    }
+
+    #[test]
+    fn end_to_end_rgba_roundtrip_is_pixel_exact() {
+        let pixels: Vec<u8> = (0..(8 * 8 * 4)).map(|i| (i % 251) as u8).collect();
+        let (vf, _) = trait_roundtrip(8, 8, PixelFormat::Rgba, None, pixels.clone());
+        assert_eq!(
+            vf.planes[0].data, pixels,
+            "RGBA survives the framework path"
+        );
+        assert_eq!(vf.planes[0].stride, 8 * 4);
+    }
+
+    #[test]
+    fn end_to_end_rgb_roundtrip_is_pixel_exact() {
+        let pixels: Vec<u8> = (0..(8 * 8 * 3)).map(|i| (i % 251) as u8).collect();
+        let (vf, _) = trait_roundtrip(8, 8, PixelFormat::Rgb24, None, pixels.clone());
+        assert_eq!(vf.planes[0].data, pixels, "RGB survives the framework path");
+        assert_eq!(vf.planes[0].stride, 8 * 3);
+    }
+
+    #[test]
+    fn end_to_end_colorspace_survives_the_framework_path() {
+        // The colorspace knob set on the encoder must reach the encoded
+        // header byte; a decode then reports it back.
+        let pixels: Vec<u8> = (0..(4 * 4 * 4)).map(|i| (i % 251) as u8).collect();
+        let (_, bytes) = trait_roundtrip(4, 4, PixelFormat::Rgba, Some("linear"), pixels);
+        assert_eq!(bytes[13], 1, "linear colorspace reached the header");
+        let img = crate::parse_qoi(&bytes).expect("valid stream");
+        assert_eq!(img.colorspace, crate::QoiColorspace::AllLinear);
+    }
 }
