@@ -512,6 +512,21 @@ impl Decoder for QoiDecoder {
         self.eof = true;
         Ok(())
     }
+    fn reset(&mut self) -> oxideav_core::Result<()> {
+        // Called by the player after a container seek: the decoder must
+        // be reusable as if freshly constructed. The trait default
+        // implementation routes through `flush()` (which sets `eof`) and
+        // never clears it again — a decoder reset that way would report
+        // `Eof` on the next `receive_frame` even after a fresh
+        // `send_packet`, since the drain loop leaves `eof == true`.
+        //
+        // QOI carries no cross-packet predictor / overlap state (each
+        // packet is a self-contained image), so a correct reset is just
+        // "forget the buffered frame and the end-of-stream latch".
+        self.pending = None;
+        self.eof = false;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "registry")]
@@ -716,5 +731,56 @@ mod registry_decoder_tests {
         };
         assert_eq!(vf.planes[0].stride, 2 * 3, "RGB stride = width * 3");
         assert_eq!(vf.planes[0].data, pixels);
+    }
+
+    #[test]
+    fn reset_after_flush_makes_the_decoder_reusable() {
+        // Regression: the trait-default reset() routes through flush()
+        // (which sets eof) and never clears it, so a decoder reset that
+        // way would report Eof forever. QOI's explicit reset() must
+        // restore the "fresh, awaiting input" state (NeedMore, not Eof).
+        let (bytes, pixels) = sample_rgba_qoi();
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("make_decoder");
+        // Decode one, flush, drain to Eof — the natural end-of-stream.
+        dec.send_packet(&packet_with(bytes.clone(), Some(1)))
+            .expect("send 1");
+        let _ = dec.receive_frame().expect("frame 1");
+        dec.flush().expect("flush");
+        assert!(matches!(dec.receive_frame(), Err(Error::Eof)));
+
+        // After a seek the player calls reset(); the decoder must come
+        // back to a NeedMore (awaiting input) state, NOT a stuck Eof.
+        dec.reset().expect("reset");
+        match dec.receive_frame() {
+            Err(Error::NeedMore) => {}
+            other => panic!("expected NeedMore after reset, got {other:?}"),
+        }
+
+        // ...and it must decode subsequent packets normally.
+        dec.send_packet(&packet_with(bytes, Some(2)))
+            .expect("send 2");
+        let Frame::Video(vf) = dec.receive_frame().expect("frame 2 after reset") else {
+            panic!("expected a video frame");
+        };
+        assert_eq!(vf.pts, Some(2));
+        assert_eq!(vf.planes[0].data, pixels);
+    }
+
+    #[test]
+    fn reset_discards_a_buffered_frame() {
+        // reset() is "forget everything", including a frame decoded but
+        // not yet drained — a seek invalidates pending output.
+        let (bytes, _) = sample_rgba_qoi();
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("make_decoder");
+        dec.send_packet(&packet_with(bytes, Some(9)))
+            .expect("send_packet");
+        // Do NOT drain — reset while a frame is pending.
+        dec.reset().expect("reset");
+        match dec.receive_frame() {
+            Err(Error::NeedMore) => {}
+            other => panic!("expected NeedMore after reset drops the pending frame, got {other:?}"),
+        }
     }
 }

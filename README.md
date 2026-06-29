@@ -263,7 +263,10 @@ types.
 
 The trait-side `Decoder` threads the surrounding `Packet`'s `pts` onto
 each produced `VideoFrame` (a `pts`-less packet yields a `pts`-less
-frame). The trait-side `Encoder` honours an optional `colorspace`
+frame) and overrides `reset()` so a decoder reused after a container
+seek returns to an awaiting-input (`NeedMore`) state rather than the
+stuck `Eof` the trait default would leave behind. The trait-side
+`Encoder` honours an optional `colorspace`
 tuning knob on `CodecParameters::options` — `"0"`/`"srgb"` (sRGB with
 linear alpha) or `"1"`/`"linear"` (all channels linear), default `0`,
 any other value rejected at construction — and echoes the resolved

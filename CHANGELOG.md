@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Round-380 trait-side `Decoder::reset`: the `oxideav_core::Decoder`
+  impl now overrides `reset()` to clear both the buffered frame and the
+  end-of-stream latch. The trait default routes `reset()` through
+  `flush()` (which sets the `eof` flag) and never clears it, so a
+  decoder reset that way would report `Eof` on the next `receive_frame`
+  even after a fresh `send_packet` — a decoder reused after a container
+  seek would wrongly signal end-of-stream. QOI carries no cross-packet
+  predictor state, so a correct reset is simply "forget the pending
+  frame and the eof latch"; the decoder is then reusable as if freshly
+  constructed. A pending-but-undrained frame is also discarded (a seek
+  invalidates buffered output).
+
 - Round-380 trait-side `Decoder`: the `oxideav_core::Decoder` impl now
   threads the surrounding `Packet`'s `pts` onto the decoded
   `VideoFrame`. Previously `send_packet` decoded through the standalone
