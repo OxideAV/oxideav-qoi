@@ -7,7 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Round-380 trait-side `Decoder`: the `oxideav_core::Decoder` impl now
+  threads the surrounding `Packet`'s `pts` onto the decoded
+  `VideoFrame`. Previously `send_packet` decoded through the standalone
+  `parse_qoi` (which always yields `pts: None`) and never read
+  `packet.pts`, so every frame produced through the trait surface had a
+  `None` presentation time regardless of the container-assigned
+  timestamp — contradicting the documented "passes pts through from the
+  surrounding Packet" behaviour. A `pts`-less packet still produces a
+  `pts`-less frame.
+
 ### Added
+
+- Round-380 trait-side `Encoder` colorspace knob: the
+  `oxideav_core::Encoder` impl now reads an optional `colorspace`
+  tuning option from `CodecParameters::options` and writes it into the
+  QOI header byte (offset 13). Accepts `"0"`/`"srgb"` (= 0, sRGB with
+  linear alpha) and `"1"`/`"linear"` (= 1, all channels linear);
+  absent → default 0; any other value is rejected with `InvalidData`
+  at encoder construction. The resolved value is echoed back through
+  `output_params().options` so a consumer querying the encoder sees
+  the exact header byte it will write. Previously the trait-side
+  encoder hard-coded colorspace 0, silently dropping the
+  linear/sRGB hint on a decode→encode round-trip through the framework.
+
+- Round-380 trait-side behavioural test suites for the
+  `oxideav_core::Decoder` / `Encoder` impls — 23 in-crate tests
+  (`src/decoder.rs::registry_decoder_tests`,
+  `src/encoder.rs::registry_encoder_tests`). Every other decoder /
+  encoder suite in this crate drives the standalone `parse_qoi` /
+  `encode_qoi` functions; none exercised the framework trait surface,
+  leaving the `send_packet`/`receive_frame` and
+  `send_frame`/`receive_packet` state machines, the `NeedMore`/`Eof`
+  protocol, `flush` transitions, packet-`pts` threading, the
+  colorspace option, the stride-repacking path, the keyframe flag, and
+  the input-validation rejections (empty plane, truncated plane,
+  unsupported / missing pixel format, non-video frame, malformed
+  packet) untested. The decoder suite pins the `pts`-threading
+  regression directly. In-crate (not `tests/`) so they name
+  `oxideav_core` types without a workspace-banned dev-dependency on the
+  framework crate.
 
 - Round-337 `tests/decoder_rejects.rs` — a *negative* decoder test
   class pinning every spec-mandated structural rejection directly

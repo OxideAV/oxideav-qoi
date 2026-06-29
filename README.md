@@ -261,6 +261,22 @@ that still exposes the standalone `parse_qoi` / `encode_qoi` API plus
 crate-local `QoiImage` / `QoiChannels` / `QoiColorspace` / `QoiError`
 types.
 
+The trait-side `Decoder` threads the surrounding `Packet`'s `pts` onto
+each produced `VideoFrame` (a `pts`-less packet yields a `pts`-less
+frame). The trait-side `Encoder` honours an optional `colorspace`
+tuning knob on `CodecParameters::options` — `"0"`/`"srgb"` (sRGB with
+linear alpha) or `"1"`/`"linear"` (all channels linear), default `0`,
+any other value rejected at construction — and echoes the resolved
+value back through `output_params().options`. The encoder repacks a
+padded source plane (`stride > width * channels`) to QOI's
+tightly-packed layout, marks every output packet as a keyframe (QOI is
+intra-only), and rejects empty / truncated planes, non-video frames,
+and unsupported / missing pixel formats with `InvalidData`. Both trait
+impls have dedicated in-crate behavioural test coverage
+(`registry_decoder_tests` / `registry_encoder_tests`) for the
+send/receive state machine, the `NeedMore` / `Eof` protocol, and every
+rejection path.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

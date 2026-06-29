@@ -536,18 +536,57 @@ pub fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn En
     out_params.width = params.width;
     out_params.height = params.height;
     out_params.pixel_format = params.pixel_format;
+    let colorspace = resolve_colorspace_option(params)?;
+    // Echo the resolved colorspace back through the output params'
+    // option map so a consumer querying `output_params()` sees the
+    // exact header byte the encoder will write, and a re-construction
+    // from those params reproduces the same stream.
+    out_params
+        .options
+        .insert("colorspace", colorspace.to_string());
     Ok(Box::new(QoiEncoder {
         codec_id: CodecId::new(crate::CODEC_ID_STR),
         out_params,
+        colorspace,
         pending: None,
         eof: false,
     }))
+}
+
+/// Read the optional `colorspace` tuning knob from
+/// [`CodecParameters::options`] and resolve it to the on-wire QOI
+/// header byte (0 = sRGB with linear alpha, 1 = all channels linear).
+///
+/// The option is purely informational per the QOI spec — it never
+/// changes the encoded chunk bytes, only the single header byte at
+/// offset 13. Absent option → default 0 (sRGB with linear alpha), the
+/// same default the standalone [`encode_qoi`] uses.
+///
+/// Accepts the numeric forms `"0"` / `"1"` and the symbolic names
+/// `"srgb"` (= 0) and `"linear"` (= 1) so callers can spell the hint
+/// either way. Any other value is a caller error and is rejected with
+/// `Error::invalid` rather than silently coerced — a malformed knob
+/// should surface at encoder construction, not be papered over.
+#[cfg(feature = "registry")]
+fn resolve_colorspace_option(params: &CodecParameters) -> oxideav_core::Result<u8> {
+    match params.options.get("colorspace") {
+        None => Ok(0),
+        Some("0") | Some("srgb") => Ok(0),
+        Some("1") | Some("linear") => Ok(1),
+        Some(other) => Err(oxideav_core::Error::invalid(format!(
+            "QOI encoder: invalid colorspace option {other:?} \
+             (expected \"0\"/\"srgb\" or \"1\"/\"linear\")"
+        ))),
+    }
 }
 
 #[cfg(feature = "registry")]
 struct QoiEncoder {
     codec_id: CodecId,
     out_params: CodecParameters,
+    /// Resolved QOI colorspace header byte (0 or 1), parsed once at
+    /// construction from the `colorspace` option.
+    colorspace: u8,
     pending: Option<Vec<u8>>,
     eof: bool,
 }
@@ -614,7 +653,7 @@ impl Encoder for QoiEncoder {
             v
         };
 
-        let bytes = encode_qoi(width, height, channels, &pixels);
+        let bytes = encode_qoi_full(width, height, channels, self.colorspace, &pixels);
         self.pending = Some(bytes);
         Ok(())
     }
@@ -637,5 +676,231 @@ impl Encoder for QoiEncoder {
     fn flush(&mut self) -> oxideav_core::Result<()> {
         self.eof = true;
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trait-side Encoder behavioural tests.
+//
+// The crate's encoder suites (`tests/canonical_encoding.rs`,
+// `tests/property_sweep.rs`, …) drive the standalone `encode_qoi`
+// function. None of them exercises the `oxideav_core::Encoder` trait
+// impl — the `send_frame` / `receive_packet` state machine, the stride
+// repacking path, the colorspace option, the pixel-format validation,
+// or the keyframe flag on the produced packet. These pin that surface.
+// In-crate (not `tests/`) so they can name `oxideav_core` types without
+// a dev-dep on the framework crate.
+// ---------------------------------------------------------------------------
+#[cfg(all(test, feature = "registry"))]
+mod registry_encoder_tests {
+    use super::*;
+    use oxideav_core::{CodecOptions, Error, VideoFrame, VideoPlane};
+
+    fn params(width: u32, height: u32, format: PixelFormat) -> CodecParameters {
+        let mut p = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
+        p.width = Some(width);
+        p.height = Some(height);
+        p.pixel_format = Some(format);
+        p
+    }
+
+    fn video_frame(stride: usize, data: Vec<u8>) -> Frame {
+        Frame::Video(VideoFrame {
+            pts: None,
+            planes: vec![VideoPlane { stride, data }],
+        })
+    }
+
+    #[test]
+    fn send_frame_then_receive_yields_a_qoi_packet() {
+        let pixels: Vec<u8> = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let mut enc = make_encoder(&params(2, 2, PixelFormat::Rgba)).expect("make_encoder");
+        enc.send_frame(&video_frame(2 * 4, pixels.clone()))
+            .expect("send_frame");
+        let pkt = enc.receive_packet().expect("receive_packet");
+        // The packet is a complete QOI file the standalone decoder reads.
+        let img = crate::parse_qoi(&pkt.data).expect("packet is a valid QOI stream");
+        assert_eq!((img.width, img.height), (2, 2));
+        assert_eq!(img.channels, crate::QoiChannels::Rgba);
+        assert_eq!(img.pixels, pixels, "round-trip is lossless");
+        assert!(pkt.flags.keyframe, "every QOI frame is an intra keyframe");
+    }
+
+    #[test]
+    fn receive_before_send_is_need_more() {
+        let mut enc = make_encoder(&params(2, 2, PixelFormat::Rgba)).expect("make_encoder");
+        match enc.receive_packet() {
+            Err(Error::NeedMore) => {}
+            other => panic!("expected NeedMore before any frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flush_then_receive_is_eof() {
+        let mut enc = make_encoder(&params(2, 2, PixelFormat::Rgba)).expect("make_encoder");
+        enc.flush().expect("flush");
+        match enc.receive_packet() {
+            Err(Error::Eof) => {}
+            other => panic!("expected Eof after flush with no pending packet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn colorspace_option_is_written_into_the_header() {
+        // The trait-side encoder must thread a `colorspace` option from
+        // CodecParameters into the QOI header byte — previously it always
+        // wrote 0 regardless of the requested colorspace.
+        let pixels: Vec<u8> = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
+        let mut p = params(2, 2, PixelFormat::Rgb24);
+        p.options = CodecOptions::new().set("colorspace", "1");
+        let mut enc = make_encoder(&p).expect("make_encoder");
+        enc.send_frame(&video_frame(2 * 3, pixels))
+            .expect("send_frame");
+        let pkt = enc.receive_packet().expect("receive_packet");
+        // Header byte 13 is the colorspace.
+        assert_eq!(pkt.data[13], 1, "colorspace=1 reaches the header");
+        let img = crate::parse_qoi(&pkt.data).expect("valid stream");
+        assert_eq!(img.colorspace, crate::QoiColorspace::AllLinear);
+    }
+
+    #[test]
+    fn colorspace_symbolic_names_resolve() {
+        for (name, expect) in [("srgb", 0u8), ("linear", 1u8)] {
+            let pixels: Vec<u8> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+            let mut p = params(2, 2, PixelFormat::Rgb24);
+            p.options = CodecOptions::new().set("colorspace", name);
+            let mut enc = make_encoder(&p).expect("make_encoder");
+            enc.send_frame(&video_frame(2 * 3, pixels))
+                .expect("send_frame");
+            let pkt = enc.receive_packet().expect("receive_packet");
+            assert_eq!(pkt.data[13], expect, "colorspace name {name:?} -> {expect}");
+        }
+    }
+
+    #[test]
+    fn colorspace_defaults_to_zero_when_unset() {
+        let pixels: Vec<u8> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let mut enc = make_encoder(&params(2, 2, PixelFormat::Rgb24)).expect("make_encoder");
+        enc.send_frame(&video_frame(2 * 3, pixels))
+            .expect("send_frame");
+        let pkt = enc.receive_packet().expect("receive_packet");
+        assert_eq!(pkt.data[13], 0, "no option -> default colorspace 0");
+    }
+
+    #[test]
+    fn output_params_echo_the_resolved_colorspace() {
+        let mut p = params(4, 4, PixelFormat::Rgba);
+        p.options = CodecOptions::new().set("colorspace", "1");
+        let enc = make_encoder(&p).expect("make_encoder");
+        assert_eq!(
+            enc.output_params().options.get("colorspace"),
+            Some("1"),
+            "output_params reflect the resolved colorspace"
+        );
+    }
+
+    #[test]
+    fn invalid_colorspace_option_is_rejected_at_construction() {
+        let mut p = params(2, 2, PixelFormat::Rgba);
+        p.options = CodecOptions::new().set("colorspace", "banana");
+        match make_encoder(&p) {
+            Err(Error::InvalidData(_)) => {}
+            Ok(_) => panic!("bogus colorspace must be rejected"),
+            Err(other) => panic!("expected InvalidData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn padded_stride_is_repacked_tight() {
+        // A source plane with stride > width*channels (row padding) must
+        // be repacked to QOI's tightly-packed layout before encoding.
+        let w = 3u32;
+        let h = 2u32;
+        let row = (w * 4) as usize; // 12 bytes of real pixels per row
+        let stride = row + 4; // 4 padding bytes per row
+        let mut data = Vec::new();
+        let mut tight = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let p = [(y * w + x) as u8, 1, 2, 255];
+                data.extend_from_slice(&p);
+                tight.extend_from_slice(&p);
+            }
+            data.extend_from_slice(&[0xAA; 4]); // padding (must be ignored)
+        }
+        assert_eq!(data.len(), stride * h as usize);
+        let mut enc = make_encoder(&params(w, h, PixelFormat::Rgba)).expect("make_encoder");
+        enc.send_frame(&video_frame(stride, data))
+            .expect("send_frame");
+        let pkt = enc.receive_packet().expect("receive_packet");
+        let img = crate::parse_qoi(&pkt.data).expect("valid stream");
+        assert_eq!(
+            img.pixels, tight,
+            "padding bytes are stripped, pixels are tight"
+        );
+    }
+
+    #[test]
+    fn unsupported_pixel_format_is_rejected() {
+        let mut enc = make_encoder(&params(2, 2, PixelFormat::Yuv420P)).expect("make_encoder");
+        let pixels = vec![0u8; 2 * 2 * 4];
+        let err = enc
+            .send_frame(&video_frame(2 * 4, pixels))
+            .expect_err("YUV is not a QOI pixel layout");
+        assert!(matches!(err, Error::InvalidData(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn missing_pixel_format_is_rejected() {
+        let mut p = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
+        p.width = Some(2);
+        p.height = Some(2);
+        // pixel_format left None.
+        let mut enc = make_encoder(&p).expect("make_encoder");
+        let err = enc
+            .send_frame(&video_frame(2 * 4, vec![0u8; 16]))
+            .expect_err("missing pixel_format must error");
+        assert!(matches!(err, Error::InvalidData(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn empty_plane_is_rejected() {
+        let mut enc = make_encoder(&params(2, 2, PixelFormat::Rgba)).expect("make_encoder");
+        let err = enc
+            .send_frame(&Frame::Video(VideoFrame {
+                pts: None,
+                planes: vec![],
+            }))
+            .expect_err("empty frame must error");
+        assert!(matches!(err, Error::InvalidData(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn truncated_plane_is_rejected() {
+        // A plane whose data is shorter than stride*height in the
+        // repack path must be rejected, not read out of bounds.
+        let mut enc = make_encoder(&params(4, 4, PixelFormat::Rgba)).expect("make_encoder");
+        // Declare padded stride but supply far too few bytes.
+        let err = enc
+            .send_frame(&video_frame(4 * 4 + 8, vec![0u8; 10]))
+            .expect_err("short plane must error");
+        assert!(matches!(err, Error::InvalidData(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn non_video_frame_is_rejected() {
+        use oxideav_core::AudioFrame;
+        let mut enc = make_encoder(&params(2, 2, PixelFormat::Rgba)).expect("make_encoder");
+        let audio = Frame::Audio(AudioFrame {
+            samples: 1,
+            pts: None,
+            data: vec![vec![0u8; 4]],
+        });
+        let err = enc
+            .send_frame(&audio)
+            .expect_err("audio is not a QOI frame");
+        assert!(matches!(err, Error::InvalidData(_)), "got {err:?}");
     }
 }

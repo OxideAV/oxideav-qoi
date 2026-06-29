@@ -485,7 +485,15 @@ impl Decoder for QoiDecoder {
     }
     fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
         let image = parse_qoi(&packet.data)?;
-        self.pending = Some(image_to_video_frame(image));
+        // QOI carries no timestamp of its own (the standalone
+        // `parse_qoi` always yields `pts: None`). Thread the surrounding
+        // `Packet`'s `pts` onto the produced frame so a muxer/player
+        // downstream sees the presentation time the container assigned —
+        // a `Packet` without a `pts` (`None`) still produces a frame with
+        // `pts: None`, unchanged.
+        let mut frame = image_to_video_frame(image);
+        frame.pts = packet.pts;
+        self.pending = Some(frame);
         Ok(())
     }
     fn receive_frame(&mut self) -> oxideav_core::Result<Frame> {
@@ -515,5 +523,198 @@ fn image_to_video_frame(image: QoiImage) -> VideoFrame {
             stride,
             data: image.pixels,
         }],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trait-side Decoder behavioural tests.
+//
+// Every other decoder suite in this crate (`tests/decoder_boundary.rs`,
+// `tests/decoder_rejects.rs`, `tests/property_sweep.rs`, …) drives the
+// standalone `parse_qoi` function directly. None of them exercises the
+// `oxideav_core::Decoder` trait impl — the `send_packet` / `receive_frame`
+// state machine, the `NeedMore` / `Eof` protocol, packet-`pts` threading,
+// or the `flush` transition. These tests pin that surface. `oxideav_core`
+// is already a (feature-gated) dependency of this crate, so they live
+// in-crate rather than in `tests/` (which would need a dev-dep on the
+// framework crate, banned by workspace policy).
+// ---------------------------------------------------------------------------
+#[cfg(all(test, feature = "registry"))]
+mod registry_decoder_tests {
+    use super::*;
+    use oxideav_core::{Error, Frame, Packet, TimeBase};
+
+    /// Build a complete 2×2 RGBA QOI byte stream for the decoder tests.
+    /// Uses the standalone encoder so the bytes are known-good.
+    fn sample_rgba_qoi() -> (Vec<u8>, Vec<u8>) {
+        let pixels: Vec<u8> = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, // row 0
+            0, 0, 255, 255, 255, 255, 255, 255, // row 1
+        ];
+        let bytes = crate::encode_qoi(2, 2, 4, &pixels);
+        (bytes, pixels)
+    }
+
+    fn packet_with(data: Vec<u8>, pts: Option<i64>) -> Packet {
+        let mut pkt = Packet::new(0, TimeBase::new(1, 1), data);
+        pkt.pts = pts;
+        pkt
+    }
+
+    #[test]
+    fn receive_before_packet_is_need_more() {
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("make_decoder");
+        // No packet sent yet, not flushed: the contract is NeedMore.
+        match dec.receive_frame() {
+            Err(Error::NeedMore) => {}
+            other => panic!("expected NeedMore before any packet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_packet_then_receive_yields_decoded_pixels() {
+        let (bytes, pixels) = sample_rgba_qoi();
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("make_decoder");
+        dec.send_packet(&packet_with(bytes, None))
+            .expect("send_packet");
+        let frame = dec.receive_frame().expect("receive_frame");
+        let Frame::Video(vf) = frame else {
+            panic!("expected a video frame");
+        };
+        assert_eq!(vf.planes.len(), 1, "QOI decodes to a single packed plane");
+        assert_eq!(vf.planes[0].stride, 2 * 4, "stride = width * channels");
+        assert_eq!(vf.planes[0].data, pixels, "decoded pixels are lossless");
+        // Draining again with no further packet is NeedMore (the single
+        // pending frame was taken).
+        match dec.receive_frame() {
+            Err(Error::NeedMore) => {}
+            other => panic!("expected NeedMore after the only frame drained, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn packet_pts_is_threaded_onto_the_frame() {
+        // Regression: the standalone `parse_qoi` always yields `pts:
+        // None`; the trait-side decoder must thread the surrounding
+        // packet's pts onto the produced frame so a player/muxer sees
+        // the container-assigned presentation time.
+        let (bytes, _) = sample_rgba_qoi();
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("make_decoder");
+        dec.send_packet(&packet_with(bytes, Some(4242)))
+            .expect("send_packet");
+        let Frame::Video(vf) = dec.receive_frame().expect("receive_frame") else {
+            panic!("expected a video frame");
+        };
+        assert_eq!(vf.pts, Some(4242), "packet pts must reach the frame");
+    }
+
+    #[test]
+    fn packet_without_pts_yields_frame_without_pts() {
+        let (bytes, _) = sample_rgba_qoi();
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("make_decoder");
+        dec.send_packet(&packet_with(bytes, None))
+            .expect("send_packet");
+        let Frame::Video(vf) = dec.receive_frame().expect("receive_frame") else {
+            panic!("expected a video frame");
+        };
+        assert_eq!(vf.pts, None, "a pts-less packet keeps the frame pts None");
+    }
+
+    #[test]
+    fn flush_then_receive_is_eof_not_need_more() {
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("make_decoder");
+        dec.flush().expect("flush");
+        match dec.receive_frame() {
+            Err(Error::Eof) => {}
+            other => panic!("expected Eof after flush with no pending frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pending_frame_drains_even_after_flush() {
+        // flush() sets eof, but a frame already decoded and pending must
+        // still drain before Eof is reported (flush is "no more input",
+        // not "discard buffered output").
+        let (bytes, _) = sample_rgba_qoi();
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("make_decoder");
+        dec.send_packet(&packet_with(bytes, Some(7)))
+            .expect("send_packet");
+        dec.flush().expect("flush");
+        // The buffered frame comes out first...
+        let Frame::Video(vf) = dec.receive_frame().expect("buffered frame drains") else {
+            panic!("expected a video frame");
+        };
+        assert_eq!(vf.pts, Some(7));
+        // ...then Eof.
+        match dec.receive_frame() {
+            Err(Error::Eof) => {}
+            other => panic!("expected Eof after the buffered frame drained, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_packet_surfaces_invalid_data() {
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("make_decoder");
+        // Not a QOI stream — bad magic.
+        let err = dec
+            .send_packet(&packet_with(b"not a qoi file at all".to_vec(), None))
+            .expect_err("malformed packet must error");
+        assert!(
+            matches!(err, Error::InvalidData(_)),
+            "expected InvalidData, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn second_packet_replaces_the_pending_frame() {
+        // The decoder buffers exactly one pending frame; a second
+        // send_packet before draining replaces it (QOI packets are
+        // self-contained single images — there is no multi-frame queue).
+        let (bytes_a, pixels_a) = sample_rgba_qoi();
+        // A distinct second image (solid green RGB).
+        let pixels_b: Vec<u8> = vec![0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0];
+        let bytes_b = crate::encode_qoi(2, 2, 3, &pixels_b);
+
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("make_decoder");
+        dec.send_packet(&packet_with(bytes_a, Some(1)))
+            .expect("send a");
+        dec.send_packet(&packet_with(bytes_b, Some(2)))
+            .expect("send b");
+        let Frame::Video(vf) = dec.receive_frame().expect("receive") else {
+            panic!("expected a video frame");
+        };
+        assert_eq!(
+            vf.pts,
+            Some(2),
+            "the second packet's frame is what's pending"
+        );
+        assert_eq!(vf.planes[0].data, pixels_b, "second image's pixels");
+        assert_ne!(
+            vf.planes[0].data, pixels_a,
+            "first image was replaced, not queued"
+        );
+    }
+
+    #[test]
+    fn rgb_packet_decodes_to_three_channel_plane() {
+        let pixels: Vec<u8> = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
+        let bytes = crate::encode_qoi(2, 2, 3, &pixels);
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("make_decoder");
+        dec.send_packet(&packet_with(bytes, None))
+            .expect("send_packet");
+        let Frame::Video(vf) = dec.receive_frame().expect("receive_frame") else {
+            panic!("expected a video frame");
+        };
+        assert_eq!(vf.planes[0].stride, 2 * 3, "RGB stride = width * 3");
+        assert_eq!(vf.planes[0].data, pixels);
     }
 }
