@@ -1,5 +1,7 @@
 # oxideav-qoi
 
+[![CI](https://github.com/OxideAV/oxideav-qoi/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-qoi/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-qoi.svg)](https://crates.io/crates/oxideav-qoi) [![docs.rs](https://docs.rs/oxideav-qoi/badge.svg)](https://docs.rs/oxideav-qoi) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust **QOI** (Quite OK Image) reader and writer for the
 [`oxideav`](https://github.com/OxideAV/oxideav) framework. Clean-room
 implementation of the one-page specification published at
