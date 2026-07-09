@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round-402 `tests/into_equivalence.rs` — a property-style sweep that
+  pins the caller-owned buffer-reuse `_into` encode / decode surface
+  (`encode_qoi_into`, `encode_qoi_full_into`, `parse_qoi_into`), which
+  until now had no correctness coverage at all — only the `reuse`
+  Criterion bench touched it, and a bench asserts throughput, not
+  bytes. Nine tests across the five op-mix generators (random / smooth
+  / run-heavy / palette / alpha-churn) assert: byte-for-byte
+  equivalence with the allocating wrappers into a fresh buffer;
+  dirty-buffer reuse (a buffer pre-filled with `0xAA` at an unrelated
+  capacity yields the identical result — guards a refactor that dropped
+  the `buf.clear()` or used `set_len` without zero-filling); shrinking
+  reuse (a large image then a small one into the SAME buffer leaves no
+  stale tail past the truncation point — the headline data-integrity
+  risk of a reused output buffer); reuse after a rejected decode (a
+  malformed stream that leaves the buffer in its documented
+  "unspecified" state must not poison the next successful decode); and
+  the capacity-amortisation promise (after the worst-case call, a run
+  of same-or-smaller images never re-grows the allocation). Uses the
+  same self-contained xorshift32 PRNG + inline generators as
+  `property_sweep` (no `proptest` / `quickcheck` dev-dep).
+
 ### Fixed
 
 - Round-380 trait-side `Decoder::receive_arena_frame`: the
