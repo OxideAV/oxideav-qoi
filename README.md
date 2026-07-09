@@ -144,7 +144,7 @@ cargo run --release --example profile_qoi -- encode 5000
 
 ## Fuzzing
 
-Six [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
+Seven [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
 live under `fuzz/`:
 
 * `decode` — feeds arbitrary bytes to `parse_qoi`, asserting the
@@ -172,6 +172,17 @@ live under `fuzz/`:
   neither panics and that, when both succeed, they agree on the decoded
   pixel bytes, the plane stride, and the arena `FrameHeader`'s true
   `(width, height, pixel_format)`.
+* `into_equiv` — differential harness for the caller-owned
+  buffer-reuse `_into` API: the same synthesised header + chunk stream
+  is decoded through both `parse_qoi` and `parse_qoi_into` (into a
+  persistent, pre-dirtied, reused buffer) and asserted to agree on
+  accept/reject, pixels, and header; when the decode succeeds the
+  recovered pixels are re-encoded through both `encode_qoi_full` and
+  `encode_qoi_full_into` and asserted byte-identical. The reuse buffers
+  persist across iterations (`thread_local`), so the `_into` path
+  continuously sees a previous, differently-sized image — the
+  shrinking-reuse stale-tail surface, driven by attacker-chosen sizes
+  and op mixes.
 
 ```sh
 cargo +nightly fuzz run decode
@@ -180,6 +191,7 @@ cargo +nightly fuzz run chunk_walk
 cargo +nightly fuzz run op_iter
 cargo +nightly fuzz run op_write
 cargo +nightly fuzz run trait_decode
+cargo +nightly fuzz run into_equiv
 ```
 
 The `decode` corpus is seeded from the byte-exact fixtures in
@@ -260,6 +272,24 @@ ignoring chunk-stream-level ones.
 
 ```sh
 cargo test -p oxideav-qoi --test decoder_rejects
+```
+
+`tests/into_equivalence.rs` pins the caller-owned buffer-reuse `_into`
+API (`encode_qoi_into`, `encode_qoi_full_into`, `parse_qoi_into`) —
+until now covered only by the `reuse` bench, which measures throughput
+rather than bytes. Across the same five op-mix generators it asserts:
+byte-for-byte equivalence with the allocating wrappers into a fresh
+buffer; dirty-buffer reuse (a buffer pre-filled with `0xAA` at an
+unrelated capacity yields the identical result); shrinking reuse (a
+large image then a small one into the *same* buffer leaves no stale
+tail past the truncation point); reuse after a rejected decode (a
+malformed stream must not poison the next successful decode); and the
+capacity-amortisation promise (after the worst-case call, a run of
+same-or-smaller images never re-grows the allocation). The `into_equiv`
+fuzz target drives the same differential on attacker-chosen inputs.
+
+```sh
+cargo test -p oxideav-qoi --test into_equivalence
 ```
 
 ## Standalone vs registry-integrated

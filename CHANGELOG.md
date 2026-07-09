@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-402 `fuzz/fuzz_targets/into_equiv.rs` — a seventh cargo-fuzz
+  target running a differential of the buffer-reuse `_into` API against
+  the allocating wrappers. The same structure-aware synthesised header +
+  chunk stream (as `chunk_walk`) is decoded through both `parse_qoi` and
+  `parse_qoi_into` (into a persistent, pre-dirtied, reused buffer) and
+  asserted to agree on accept/reject, decoded pixels, and header; when
+  the decode succeeds, the recovered pixels are re-encoded through both
+  `encode_qoi_full` and `encode_qoi_full_into` and asserted
+  byte-identical. The reuse buffers persist across iterations via
+  `thread_local`, so the `_into` path continuously sees a previous,
+  differently-sized image — the shrinking-reuse stale-tail surface the
+  deterministic `into_equivalence` test pins by hand, here driven by
+  attacker-chosen sizes and op mixes. The daily `fuzz.yml` workflow
+  auto-discovers the new target.
+
 - Round-402 `tests/into_equivalence.rs` — a property-style sweep that
   pins the caller-owned buffer-reuse `_into` encode / decode surface
   (`encode_qoi_into`, `encode_qoi_full_into`, `parse_qoi_into`), which

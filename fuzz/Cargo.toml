@@ -119,3 +119,22 @@ name = "trait_decode"
 path = "fuzz_targets/trait_decode.rs"
 test = false
 doc = false
+
+# Seventh target — differential fuzz of the caller-owned buffer-reuse
+# `_into` API (parse_qoi_into / encode_qoi_full_into) against the
+# allocating wrappers (parse_qoi / encode_qoi_full). The first 6 fuzz
+# bytes pick a spec-valid header shape; the rest become the chunk stream
+# wrapped with a correct header + end marker. The decode is run through
+# both entry points (the `_into` one into a persistent, pre-dirtied,
+# reused buffer) and asserted to agree on accept/reject + pixels +
+# header; when the decode succeeds, the recovered pixels are re-encoded
+# through both encode entry points and asserted byte-identical. The
+# reuse buffers persist across iterations via thread_local, so the
+# `_into` path continuously sees a previous differently-sized image —
+# the shrinking-reuse stale-tail surface driven by attacker-chosen
+# sizes + op mixes.
+[[bin]]
+name = "into_equiv"
+path = "fuzz_targets/into_equiv.rs"
+test = false
+doc = false
