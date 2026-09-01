@@ -110,7 +110,11 @@ pub use image::{QoiChannels, QoiColorspace, QoiHeader, QoiImage};
 pub use ops::{iter_ops, iter_ops_strict, qoi_hash, QoiOp, QoiOpIter};
 
 #[cfg(feature = "registry")]
-pub use registry::{__oxideav_entry, register, register_codecs, register_containers};
+pub use registry::{register, register_codecs, register_containers};
+
+#[cfg(feature = "registry")]
+#[doc(hidden)]
+pub use registry::__oxideav_entry;
 
 #[cfg(test)]
 mod tests {
