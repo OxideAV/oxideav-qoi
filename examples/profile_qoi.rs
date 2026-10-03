@@ -24,6 +24,10 @@
 //!                   N times against the cached bytes
 //!     encode      — synth pixels, encode N times (decoder cost excluded)
 //!     roundtrip   — synth pixels, encode + decode every iteration
+//!     12mp        — one photo-like 4000×3000 RGBA image (12 MP, 45.8 MiB
+//!                   raw): encode once, time N full `decode` calls through
+//!                   the contract API and report MP/s + MiB/s (the README's
+//!                   "decode speed" row)
 //!     all         — run every mode (default)
 //!
 //! With `samply`:
@@ -337,6 +341,66 @@ fn profile_roundtrip(iters_override: Option<u32>) {
     }
 }
 
+/// Photo-like 12 MP RGBA frame: a smooth two-axis gradient with a
+/// low-amplitude pseudo-random dither on every channel, a constant
+/// alpha, and a band of flat colour every 64 rows. The dither keeps the
+/// encoder off the INDEX / RUN fast paths for most pixels (DIFF / LUMA
+/// dominate, as in a photograph) while the flat bands exercise RUN.
+fn build_photo_like_rgba(width: u32, height: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(width as usize * height as usize * 4);
+    let mut state = 0x9E37_79B9u32;
+    for y in 0..height {
+        let flat = (y / 64) % 5 == 4;
+        for x in 0..width {
+            if flat {
+                out.extend_from_slice(&[24, 96, 160, 255]);
+                continue;
+            }
+            let base_r = ((x * 255) / width.max(1)) as u8;
+            let base_g = ((y * 255) / height.max(1)) as u8;
+            let base_b = (((x + y) * 127) / (width + height).max(1)) as u8;
+            let n = xorshift_byte(&mut state);
+            let dr = (n & 0x03) as i16 - 1;
+            let dg = ((n >> 2) & 0x03) as i16 - 1;
+            let db = ((n >> 4) & 0x03) as i16 - 1;
+            out.push((base_r as i16 + dr).clamp(0, 255) as u8);
+            out.push((base_g as i16 + dg).clamp(0, 255) as u8);
+            out.push((base_b as i16 + db).clamp(0, 255) as u8);
+            out.push(255);
+        }
+    }
+    out
+}
+
+fn profile_12mp(iters_override: Option<u32>) {
+    println!("== 12 MP RGBA decode (contract API) ==");
+    let (w, h) = (4000u32, 3000u32);
+    let pixels = build_photo_like_rgba(w, h);
+    let bytes = oxideav_qoi::encode_rgba8(w, h, &pixels, &oxideav_qoi::EncodeOptions::default())
+        .expect("encode");
+    let iters = iters_override.unwrap_or(20);
+    // Warm-up + correctness check.
+    let img = decode(&bytes).expect("decode");
+    assert_eq!(img.as_bytes().unwrap(), &pixels[..]);
+    let t = Instant::now();
+    let mut sink = 0usize;
+    for _ in 0..iters {
+        sink ^= decode_once(std::hint::black_box(&bytes));
+    }
+    std::hint::black_box(sink);
+    let elapsed = t.elapsed().as_secs_f64();
+    let per_iter_ms = elapsed * 1000.0 / iters as f64;
+    let mp = (w as f64 * h as f64) / 1e6;
+    let raw_mib = (pixels.len() as f64) / (1024.0 * 1024.0);
+    println!(
+        "  decode    {w}x{h} RGBA ({mp:.1} MP, raw {raw_mib:.1} MiB, qoi {:.1} MiB) iters={iters}          {per_iter_ms:.2} ms/iter  {:.1} MP/s  {:.1} MiB/s (raw)",
+        bytes.len() as f64 / (1024.0 * 1024.0),
+        mp / (per_iter_ms / 1000.0),
+        raw_mib / (per_iter_ms / 1000.0),
+    );
+    std::io::stdout().flush().ok();
+}
+
 fn main() {
     let mut args = env::args().skip(1);
     let mode = args.next().unwrap_or_else(|| "all".to_string());
@@ -354,6 +418,7 @@ fn main() {
         "encode" => profile_encode(iters_override),
         "decode" => profile_decode(iters_override),
         "roundtrip" => profile_roundtrip(iters_override),
+        "12mp" => profile_12mp(iters_override),
         "all" => {
             profile_encode(iters_override);
             println!();
@@ -363,7 +428,7 @@ fn main() {
         }
         other => {
             eprintln!("unknown mode: {other:?}");
-            eprintln!("usage: profile_qoi [encode|decode|roundtrip|all] [<iters>]");
+            eprintln!("usage: profile_qoi [encode|decode|roundtrip|12mp|all] [<iters>]");
             std::process::exit(2);
         }
     }
