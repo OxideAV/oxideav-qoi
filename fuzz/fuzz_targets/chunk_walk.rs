@@ -27,7 +27,7 @@
 //! intentionally discarded.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_qoi::{parse_qoi, END_MARKER, MAGIC};
+use oxideav_qoi::{decode, END_MARKER, MAGIC};
 
 // Cap the synthesized image dimensions. The decoder rejects any header
 // claiming more pixels than `chunks.len() * 62` can possibly decode, so
@@ -42,7 +42,7 @@ fuzz_target!(|data: &[u8]| {
     if data.len() < 6 {
         // Still exercise the very-short path through the real entry
         // point so those inputs aren't simply ignored.
-        let _ = parse_qoi(data);
+        let _ = decode(data);
         return;
     }
 
@@ -74,5 +74,5 @@ fuzz_target!(|data: &[u8]| {
     buf.extend_from_slice(END_MARKER);
 
     // The contract: returns, never panics.
-    let _ = parse_qoi(&buf);
+    let _ = decode(&buf);
 });

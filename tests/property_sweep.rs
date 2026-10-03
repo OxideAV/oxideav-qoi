@@ -24,7 +24,7 @@
 //! For every randomly generated `(width, height, channels,
 //! colorspace, pixels)`:
 //!
-//! 1. **Lossless roundtrip.** `parse_qoi(encode_qoi_full(w, h, ch,
+//! 1. **Lossless roundtrip.** `decode(encode_px(w, h, ch,
 //!    cs, px))` returns an `Ok(QoiImage)` whose `(width, height,
 //!    channels, colorspace, pixels)` equals the input.
 //!    This is the spec's primary guarantee — any drift between the
@@ -72,9 +72,7 @@
 //! (RUN > INDEX > DIFF > LUMA > RGB / RGBA) and the per-chunk
 //! arithmetic in the same pass.
 
-use oxideav_qoi::{
-    encode_qoi_full, parse_qoi, QoiChannels, QoiColorspace, END_MARKER, HEADER_SIZE, MAGIC,
-};
+use oxideav_qoi::{decode, QoiChannels, QoiColorspace, END_MARKER, HEADER_SIZE, MAGIC};
 
 // ---------------------------------------------------------------------------
 // Deterministic PRNG
@@ -234,8 +232,8 @@ fn assert_invariants(
     debug_assert_eq!(pixels.len(), n * channels as usize);
 
     // --- Invariant 1: lossless roundtrip + encoder determinism ---
-    let bytes = encode_qoi_full(width, height, channels, colorspace, pixels);
-    let bytes2 = encode_qoi_full(width, height, channels, colorspace, pixels);
+    let bytes = encode_px(width, height, channels, colorspace, pixels);
+    let bytes2 = encode_px(width, height, channels, colorspace, pixels);
     assert_eq!(
         bytes, bytes2,
         "[{label}] seed={seed} w={width} h={height} ch={channels} cs={colorspace}: \
@@ -286,7 +284,7 @@ fn assert_invariants(
     );
 
     // --- Invariant 1 (cont.): decode round-trip ---
-    let back = parse_qoi(&bytes).unwrap_or_else(|e| {
+    let back = decode(&bytes).unwrap_or_else(|e| {
         panic!(
             "[{label}] seed={seed} w={width} h={height} ch={channels} cs={colorspace}: \
              parse_qoi rejected encoder output: {e:?}"
@@ -300,7 +298,8 @@ fn assert_invariants(
         QoiChannels::Rgb
     };
     assert_eq!(
-        back.channels, want_channels,
+        back.channels(),
+        want_channels,
         "[{label}] seed={seed}: channels enum drift"
     );
     let want_cs = if colorspace == 1 {
@@ -309,17 +308,25 @@ fn assert_invariants(
         QoiColorspace::SrgbWithLinearAlpha
     };
     assert_eq!(
-        back.colorspace, want_cs,
+        back.colorspace(),
+        want_cs,
         "[{label}] seed={seed}: colorspace enum drift"
     );
     assert_eq!(
-        back.pixels, pixels,
+        back.as_bytes().unwrap(),
+        pixels,
         "[{label}] seed={seed} w={width} h={height} ch={channels} cs={colorspace}: \
          pixel round-trip mismatch"
     );
 
     // --- Invariant 6: idempotent re-encode ---
-    let bytes3 = encode_qoi_full(back.width, back.height, channels, colorspace, &back.pixels);
+    let bytes3 = encode_px(
+        back.width,
+        back.height,
+        channels,
+        colorspace,
+        back.as_bytes().unwrap(),
+    );
     assert_eq!(
         bytes, bytes3,
         "[{label}] seed={seed} w={width} h={height} ch={channels} cs={colorspace}: \
@@ -423,7 +430,7 @@ fn property_sweep_solid_fill_compact_bound() {
                     pixels.push(a);
                 }
             }
-            let bytes = encode_qoi_full(w, 1, channels, colorspace, &pixels);
+            let bytes = encode_px(w, 1, channels, colorspace, &pixels);
             // Bound: header (14) + at most one seed chunk (up to 5
             // bytes — RGBA worst case) + at most one RUN byte per
             // full 62-pixel block + end marker (8).
@@ -437,9 +444,10 @@ fn property_sweep_solid_fill_compact_bound() {
             );
 
             // Roundtrip still holds.
-            let back = parse_qoi(&bytes).expect("decode of solid fill");
+            let back = decode(&bytes).expect("decode of solid fill");
             assert_eq!(
-                back.pixels, pixels,
+                back.as_bytes().unwrap(),
+                pixels,
                 "iter={iter} w={w} ch={channels}: solid-fill round-trip drift"
             );
         }
@@ -496,4 +504,18 @@ fn generators_produce_well_sized_buffers() {
             assert_eq!(pixels_alpha_churn(&mut rng, n, ch).len(), n * ch as usize);
         }
     }
+}
+
+/// Raw-argument encode over the contract API (`channels` 3 / 4,
+/// `colorspace` 0 / 1) — the shape the pre-contract `encode_qoi_full`
+/// had, so the fixtures below read as before.
+fn encode_px(w: u32, h: u32, channels: u8, colorspace: u8, px: &[u8]) -> Vec<u8> {
+    let opts = oxideav_qoi::EncodeOptions::default()
+        .with_colorspace(oxideav_qoi::QoiColorspace::from_byte(colorspace).expect("colorspace"));
+    match channels {
+        3 => oxideav_qoi::encode_rgb8(w, h, px, &opts),
+        4 => oxideav_qoi::encode_rgba8(w, h, px, &opts),
+        other => panic!("channels must be 3 or 4, got {other}"),
+    }
+    .expect("encode")
 }

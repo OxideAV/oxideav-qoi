@@ -49,8 +49,7 @@
 //! reproducible from the printed seed.
 
 use oxideav_qoi::{
-    encode_qoi, encode_qoi_full, encode_qoi_full_into, encode_qoi_into, parse_qoi, parse_qoi_into,
-    QoiChannels, QoiColorspace,
+    decode, encode_qoi_full_into, encode_qoi_into, parse_qoi_into, QoiChannels, QoiColorspace,
 };
 
 // ---------------------------------------------------------------------------
@@ -200,7 +199,7 @@ fn assert_into_equivalence(
     let ctx = format!("[{label}] seed={seed} w={width} h={height} ch={channels} cs={colorspace}");
 
     // --- Reference (allocating) encode ---
-    let reference = encode_qoi_full(width, height, channels, colorspace, pixels);
+    let reference = encode_px(width, height, channels, colorspace, pixels);
 
     // --- encode_qoi_full_into into a fresh buffer ---
     let mut fresh = Vec::new();
@@ -231,21 +230,18 @@ fn assert_into_equivalence(
 
     // --- encode_qoi_into (colorspace-0 convenience) matches when cs==0 ---
     if colorspace == 0 {
-        let alloc0 = encode_qoi(width, height, channels, pixels);
-        assert_eq!(
-            alloc0, reference,
-            "{ctx}: encode_qoi != encode_qoi_full(cs=0)"
-        );
+        let alloc0 = encode_px(width, height, channels, 0, pixels);
+        assert_eq!(alloc0, reference, "{ctx}: encode_qoi != encode_px(cs=0)");
         let mut into0 = vec![0xAAu8; 5];
         encode_qoi_into(&mut into0, width, height, channels, pixels);
         assert_eq!(
             into0, reference,
-            "{ctx}: encode_qoi_into != encode_qoi_full(cs=0)"
+            "{ctx}: encode_qoi_into != encode_px(cs=0)"
         );
     }
 
     // --- Reference (allocating) decode ---
-    let ref_img = parse_qoi(&reference)
+    let ref_img = decode(&reference)
         .unwrap_or_else(|e| panic!("{ctx}: parse_qoi rejected encoder output: {e:?}"));
 
     // --- parse_qoi_into into a fresh buffer ---
@@ -253,17 +249,20 @@ fn assert_into_equivalence(
     let hdr = parse_qoi_into(&reference, &mut dec_fresh)
         .unwrap_or_else(|e| panic!("{ctx}: parse_qoi_into(fresh) rejected valid stream: {e:?}"));
     assert_eq!(
-        dec_fresh, ref_img.pixels,
+        dec_fresh,
+        ref_img.as_bytes().unwrap(),
         "{ctx}: parse_qoi_into(fresh) pixels != parse_qoi pixels"
     );
     assert_eq!(hdr.width, ref_img.width, "{ctx}: header width drift");
     assert_eq!(hdr.height, ref_img.height, "{ctx}: header height drift");
     assert_eq!(
-        hdr.channels, ref_img.channels,
+        hdr.channels,
+        ref_img.channels(),
         "{ctx}: header channels drift"
     );
     assert_eq!(
-        hdr.colorspace, ref_img.colorspace,
+        hdr.colorspace,
+        ref_img.colorspace(),
         "{ctx}: header colorspace drift"
     );
     assert_eq!(
@@ -273,13 +272,14 @@ fn assert_into_equivalence(
     );
 
     // --- parse_qoi_into into a pre-dirtied, pre-grown buffer ---
-    let mut dec_dirty = vec![0xAAu8; ref_img.pixels.len() + 61];
+    let mut dec_dirty = vec![0xAAu8; ref_img.as_bytes().unwrap().len() + 61];
     dec_dirty.reserve(8192);
     let dcap_before = dec_dirty.capacity();
     parse_qoi_into(&reference, &mut dec_dirty)
         .unwrap_or_else(|e| panic!("{ctx}: parse_qoi_into(dirty) rejected valid stream: {e:?}"));
     assert_eq!(
-        dec_dirty, ref_img.pixels,
+        dec_dirty,
+        ref_img.as_bytes().unwrap(),
         "{ctx}: parse_qoi_into(dirty) leaked stale bytes / diverged"
     );
     assert!(
@@ -382,7 +382,7 @@ fn encode_into_shrinking_reuse_has_no_stale_tail() {
             let big_cap = enc_buf.capacity();
             encode_qoi_full_into(&mut enc_buf, small_w, small_h, channels, cs, &small_px);
 
-            let fresh = encode_qoi_full(small_w, small_h, channels, cs, &small_px);
+            let fresh = encode_px(small_w, small_h, channels, cs, &small_px);
             assert_eq!(
                 enc_buf, fresh,
                 "[{label}] iter={iter}: shrinking encode reuse left a stale tail"
@@ -412,8 +412,8 @@ fn decode_into_shrinking_reuse_has_no_stale_tail() {
             let big_px = gen(&mut rng, (big_w * big_h) as usize, channels);
             let small_px = gen(&mut rng, (small_w * small_h) as usize, channels);
 
-            let big_stream = encode_qoi_full(big_w, big_h, channels, cs, &big_px);
-            let small_stream = encode_qoi_full(small_w, small_h, channels, cs, &small_px);
+            let big_stream = encode_px(big_w, big_h, channels, cs, &big_px);
+            let small_stream = encode_px(small_w, small_h, channels, cs, &small_px);
 
             // Prime the buffer with the large decode, then decode the
             // small stream into the SAME buffer.
@@ -482,7 +482,7 @@ fn decode_into_reuse_after_rejected_stream_is_clean() {
             let channels = if rng.next_byte() & 1 == 1 { 4 } else { 3 };
             let cs = rng.next_byte() & 1;
             let px = gen(&mut rng, (width * height) as usize, channels);
-            let valid = encode_qoi_full(width, height, channels, cs, &px);
+            let valid = encode_px(width, height, channels, cs, &px);
 
             for bad in &bad_streams {
                 // Poison the buffer with a rejected decode.
@@ -532,7 +532,7 @@ fn into_capacity_is_amortised_across_repeated_calls() {
     let channels = 4u8;
     let big = pixels_alpha_churn(&mut rng, (w * h) as usize, channels);
     encode_qoi_full_into(&mut enc_buf, w, h, channels, 0, &big);
-    let stream = encode_qoi_full(w, h, channels, 0, &big);
+    let stream = encode_px(w, h, channels, 0, &big);
     parse_qoi_into(&stream, &mut dec_buf).unwrap();
 
     let enc_cap = enc_buf.capacity();
@@ -544,7 +544,7 @@ fn into_capacity_is_amortised_across_repeated_calls() {
         let sh = rng.range_u32(1, h);
         let px = pixels_alpha_churn(&mut rng, (sw * sh) as usize, channels);
         encode_qoi_full_into(&mut enc_buf, sw, sh, channels, 0, &px);
-        let s = encode_qoi_full(sw, sh, channels, 0, &px);
+        let s = encode_px(sw, sh, channels, 0, &px);
         parse_qoi_into(&s, &mut dec_buf).unwrap();
 
         assert!(
@@ -560,4 +560,18 @@ fn into_capacity_is_amortised_across_repeated_calls() {
             dec_buf.capacity()
         );
     }
+}
+
+/// Raw-argument encode over the contract API (`channels` 3 / 4,
+/// `colorspace` 0 / 1) — the shape the pre-contract `encode_qoi_full`
+/// had, so the fixtures below read as before.
+fn encode_px(w: u32, h: u32, channels: u8, colorspace: u8, px: &[u8]) -> Vec<u8> {
+    let opts = oxideav_qoi::EncodeOptions::default()
+        .with_colorspace(oxideav_qoi::QoiColorspace::from_byte(colorspace).expect("colorspace"));
+    match channels {
+        3 => oxideav_qoi::encode_rgb8(w, h, px, &opts),
+        4 => oxideav_qoi::encode_rgba8(w, h, px, &opts),
+        other => panic!("channels must be 3 or 4, got {other}"),
+    }
+    .expect("encode")
 }

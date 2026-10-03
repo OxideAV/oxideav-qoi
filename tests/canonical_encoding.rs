@@ -72,7 +72,7 @@
 //! across thousands of pseudo-random inputs, plus a handful of
 //! hand-built streams that pin the spec's named edge cases.
 
-use oxideav_qoi::{encode_qoi_full, iter_ops, qoi_hash, QoiOp};
+use oxideav_qoi::{iter_ops, qoi_hash, QoiOp};
 
 // ---------------------------------------------------------------------------
 // Deterministic PRNG (same family as property_sweep.rs / the benches).
@@ -280,7 +280,7 @@ fn luma_fits(prev: [u8; 4], cur: [u8; 4]) -> bool {
 
 #[track_caller]
 fn assert_canonical(seed: u32, label: &str, width: u32, height: u32, channels: u8, pixels: &[u8]) {
-    let bytes = encode_qoi_full(width, height, channels, /* colorspace */ 0, pixels);
+    let bytes = encode_px(width, height, channels, /* colorspace */ 0, pixels);
     let (_hdr, ops) = iter_ops(&bytes).unwrap_or_else(|e| {
         panic!("[{label}] seed={seed}: iter_ops rejected encoder output: {e:?}")
     });
@@ -525,7 +525,7 @@ fn canonical_solid_fill_runs_are_maxed() {
 
         // Then specifically: collect RUN lengths; all but the last must
         // be 62.
-        let bytes = encode_qoi_full(w, 1, ch, 0, &pixels);
+        let bytes = encode_px(w, 1, ch, 0, &pixels);
         let (_h, ops) = iter_ops(&bytes).unwrap();
         let runs: Vec<u8> = ops
             .filter_map(|op| match op {
@@ -566,7 +566,7 @@ fn canonical_no_consecutive_same_index() {
     }
     assert_canonical(0xabab, "abab", n as u32, 1, 4, &pixels);
 
-    let bytes = encode_qoi_full(n as u32, 1, 4, 0, &pixels);
+    let bytes = encode_px(n as u32, 1, 4, 0, &pixels);
     let (_h, ops) = iter_ops(&bytes).unwrap();
     let mut last_index: Option<u8> = None;
     for op in ops {
@@ -584,4 +584,18 @@ fn canonical_no_consecutive_same_index() {
             _ => last_index = None,
         }
     }
+}
+
+/// Raw-argument encode over the contract API (`channels` 3 / 4,
+/// `colorspace` 0 / 1) — the shape the pre-contract `encode_qoi_full`
+/// had, so the fixtures below read as before.
+fn encode_px(w: u32, h: u32, channels: u8, colorspace: u8, px: &[u8]) -> Vec<u8> {
+    let opts = oxideav_qoi::EncodeOptions::default()
+        .with_colorspace(oxideav_qoi::QoiColorspace::from_byte(colorspace).expect("colorspace"));
+    match channels {
+        3 => oxideav_qoi::encode_rgb8(w, h, px, &opts),
+        4 => oxideav_qoi::encode_rgba8(w, h, px, &opts),
+        other => panic!("channels must be 3 or 4, got {other}"),
+    }
+    .expect("encode")
 }

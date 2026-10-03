@@ -1,7 +1,7 @@
 #![no_main]
 
 //! Encode-then-decode roundtrip target. QOI is a lossless format, so
-//! `parse_qoi(encode_qoi(w, h, ch, px)) == (w, h, ch, px)` must hold
+//! `decode(encode_px(w, h, ch, 0, px)) == (w, h, ch, px)` must hold
 //! for every well-formed pixel input. This target derives a small
 //! image header from the first few fuzz bytes, feeds the rest as raw
 //! pixel data, calls [`encode_qoi_full`], then [`parse_qoi`], and
@@ -28,7 +28,7 @@
 //! of waiting on encoder loops.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_qoi::{encode_qoi_full, parse_qoi, QoiChannels, QoiColorspace};
+use oxideav_qoi::{decode, QoiChannels, QoiColorspace};
 
 // Hard cap on per-iteration work. 256×256 RGBA = 256 KiB pixel bytes
 // in, ≤1.25 MiB encoded, and ≤256 KiB decoded back out — bounded
@@ -81,7 +81,7 @@ fuzz_target!(|data: &[u8]| {
     }
     debug_assert_eq!(pixels.len(), needed);
 
-    let bytes = encode_qoi_full(width, height, channels, colorspace, &pixels);
+    let bytes = encode_px(width, height, channels, colorspace, &pixels);
 
     // Sanity-check the encoder's output before handing it to the
     // decoder: the size must fit the worst-case bound the encoder
@@ -99,7 +99,7 @@ fuzz_target!(|data: &[u8]| {
     );
 
     // The lossless roundtrip contract.
-    let back = parse_qoi(&bytes).unwrap_or_else(|e| {
+    let back = decode(&bytes).unwrap_or_else(|e| {
         panic!(
             "parse_qoi rejected encoder output: {e:?} \
              ({}x{} ch={} colorspace={}, encoded={} bytes, pixels_in={})",
@@ -115,7 +115,7 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(back.width, width);
     assert_eq!(back.height, height);
     assert_eq!(
-        back.channels,
+        back.channels(),
         if channels == 4 {
             QoiChannels::Rgba
         } else {
@@ -123,7 +123,7 @@ fuzz_target!(|data: &[u8]| {
         }
     );
     assert_eq!(
-        back.colorspace,
+        back.colorspace(),
         if colorspace == 1 {
             QoiColorspace::AllLinear
         } else {
@@ -131,9 +131,27 @@ fuzz_target!(|data: &[u8]| {
         }
     );
     assert_eq!(
-        back.pixels, pixels,
+        back.as_bytes().unwrap(),
+        pixels,
         "lossless roundtrip broke: encoder/decoder mismatch \
          ({}x{} ch={} colorspace={})",
-        width, height, channels, colorspace,
+        width,
+        height,
+        channels,
+        colorspace,
     );
 });
+
+/// Raw-argument encode over the contract API (`channels` 3 / 4,
+/// `colorspace` 0 / 1) — the shape the pre-contract `encode_qoi_full`
+/// had, so the fixtures below read as before.
+fn encode_px(w: u32, h: u32, channels: u8, colorspace: u8, px: &[u8]) -> Vec<u8> {
+    let opts = oxideav_qoi::EncodeOptions::default()
+        .with_colorspace(oxideav_qoi::QoiColorspace::from_byte(colorspace).expect("colorspace"));
+    match channels {
+        3 => oxideav_qoi::encode_rgb8(w, h, px, &opts),
+        4 => oxideav_qoi::encode_rgba8(w, h, px, &opts),
+        other => panic!("channels must be 3 or 4, got {other}"),
+    }
+    .expect("encode")
+}

@@ -24,7 +24,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use oxideav_qoi::{encode_qoi, encode_qoi_into, parse_qoi, parse_qoi_into};
+use oxideav_qoi::{decode, encode_qoi_into, parse_qoi_into};
 
 /// Number of encode (or decode) calls inside a single bench
 /// iteration. Larger N amortises the per-iter criterion overhead
@@ -77,7 +77,7 @@ fn bench_encode_alloc_per_call(c: &mut Criterion) {
             // `Vec::truncate` work that the `_into` variant
             // amortises.
             for _ in 0..CALLS_PER_ITER {
-                let bytes = encode_qoi(BENCH_DIM, BENCH_DIM, 4, criterion::black_box(&pixels));
+                let bytes = encode_px(BENCH_DIM, BENCH_DIM, 4, 0, criterion::black_box(&pixels));
                 criterion::black_box(bytes);
             }
         });
@@ -114,7 +114,7 @@ fn bench_encode_reused_buffer(c: &mut Criterion) {
 
 fn bench_decode_alloc_per_call(c: &mut Criterion) {
     let pixels = build_small_rgba(BENCH_DIM, BENCH_DIM);
-    let bytes = encode_qoi(BENCH_DIM, BENCH_DIM, 4, &pixels);
+    let bytes = encode_px(BENCH_DIM, BENCH_DIM, 4, 0, &pixels);
     let bytes_per_call = (BENCH_DIM * BENCH_DIM * 4) as usize;
     let mut g = c.benchmark_group("decode_alloc_per_call_64x64_x256");
     g.throughput(Throughput::Bytes((bytes_per_call * CALLS_PER_ITER) as u64));
@@ -124,7 +124,7 @@ fn bench_decode_alloc_per_call(c: &mut Criterion) {
             // the pixel buffer. This bench captures the cost the
             // `_into` variant erases.
             for _ in 0..CALLS_PER_ITER {
-                let img = parse_qoi(criterion::black_box(&bytes)).expect("decode");
+                let img = decode(criterion::black_box(&bytes)).expect("decode");
                 criterion::black_box(img);
             }
         });
@@ -134,7 +134,7 @@ fn bench_decode_alloc_per_call(c: &mut Criterion) {
 
 fn bench_decode_reused_buffer(c: &mut Criterion) {
     let pixels = build_small_rgba(BENCH_DIM, BENCH_DIM);
-    let bytes = encode_qoi(BENCH_DIM, BENCH_DIM, 4, &pixels);
+    let bytes = encode_px(BENCH_DIM, BENCH_DIM, 4, 0, &pixels);
     let bytes_per_call = (BENCH_DIM * BENCH_DIM * 4) as usize;
     let mut g = c.benchmark_group("decode_reused_buffer_64x64_x256");
     g.throughput(Throughput::Bytes((bytes_per_call * CALLS_PER_ITER) as u64));
@@ -159,3 +159,17 @@ criterion_group!(
     bench_decode_reused_buffer,
 );
 criterion_main!(benches);
+
+/// Raw-argument encode over the contract API (`channels` 3 / 4,
+/// `colorspace` 0 / 1) — the shape the pre-contract `encode_qoi_full`
+/// had, so the fixtures below read as before.
+fn encode_px(w: u32, h: u32, channels: u8, colorspace: u8, px: &[u8]) -> Vec<u8> {
+    let opts = oxideav_qoi::EncodeOptions::default()
+        .with_colorspace(oxideav_qoi::QoiColorspace::from_byte(colorspace).expect("colorspace"));
+    match channels {
+        3 => oxideav_qoi::encode_rgb8(w, h, px, &opts),
+        4 => oxideav_qoi::encode_rgba8(w, h, px, &opts),
+        other => panic!("channels must be 3 or 4, got {other}"),
+    }
+    .expect("encode")
+}

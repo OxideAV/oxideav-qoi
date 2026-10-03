@@ -8,7 +8,7 @@
 //! The decoder runs over the input in a single linear pass and never
 //! seeks. Every chunk is dispatched on the leading byte (8-bit tags
 //! `0xfe` / `0xff` shadow the 2-bit `11` RUN tag values 62 / 63 — see
-//! [`Chunk::from_tag`]). On success it returns one [`QoiImage`] with a
+//! `Chunk::from_tag`). On success it returns one [`QoiImage`] with a
 //! tightly-packed `width * height * channels` pixel buffer.
 //!
 //! Decoded output is *always* lossless; QOI carries no quantisation
@@ -18,12 +18,13 @@
 
 use crate::error::{QoiError as Error, Result};
 use crate::image::{QoiChannels, QoiColorspace, QoiHeader, QoiImage};
+use crate::options::DecodeOptions;
 use crate::{END_MARKER, HEADER_SIZE, MAGIC, OP_DIFF, OP_INDEX, OP_LUMA, OP_RGB, OP_RGBA, OP_RUN};
 
 #[cfg(feature = "registry")]
 use oxideav_core::Decoder;
 #[cfg(feature = "registry")]
-use oxideav_core::{CodecId, CodecParameters, Frame, Packet, PixelFormat, VideoFrame, VideoPlane};
+use oxideav_core::{CodecId, CodecParameters, Frame, Packet};
 
 // ---------------------------------------------------------------------------
 // Public standalone API
@@ -31,39 +32,23 @@ use oxideav_core::{CodecId, CodecParameters, Frame, Packet, PixelFormat, VideoFr
 
 /// Cheap header-only probe of a QOI byte slice.
 ///
-/// Validates the same 14-byte header [`parse_qoi`] would and returns
+/// Deprecated: use [`crate::info`] (contract shape, [`crate::ImageInfo`])
+/// or [`crate::iter_ops`] (which also yields the raw [`QoiHeader`]).
+///
+/// Validates the same 14-byte header the decoder would and returns
 /// the parsed metadata — width, height, channels, colorspace — without
-/// touching the chunk stream or allocating a pixel buffer. The post-
-/// header body is *not* inspected: a file whose header parses
-/// successfully here can still fail [`parse_qoi`] later if the chunk
-/// stream is truncated or the trailing end marker is missing/wrong.
-///
-/// Intended for thumbnail-grid probing, pixel-buffer pre-sizing, and
-/// per-application limit checks (e.g. "reject any `.qoi` larger than
-/// 8K × 8K before allocating a decode buffer") where decoding the full
-/// pixel stream would be wasteful.
-///
-/// Returns [`QoiError::InvalidData`] for the same header-level errors
-/// `parse_qoi` does:
-/// * input shorter than the 14-byte header,
-/// * leading bytes ≠ `qoif`,
-/// * `channels` field ≠ 3 and ≠ 4,
-/// * `colorspace` field ≠ 0 and ≠ 1,
-/// * width or height = 0.
-///
-/// Note `parse_qoi_header` accepts inputs as short as 14 bytes (the
-/// header alone). `parse_qoi` rejects anything shorter than
-/// `14 + 8 = 22` bytes because it also requires the trailing end
-/// marker; the header probe does not.
+/// touching the chunk stream or allocating a pixel buffer. Accepts
+/// inputs as short as 14 bytes (the header alone).
+#[deprecated(note = "use oxideav_qoi::info (IMAGE_CRATE_API)")]
 pub fn parse_qoi_header(input: &[u8]) -> Result<QoiHeader> {
-    parse_header_only(input)
+    parse_header(input)
 }
 
-/// Internal header-only parser shared by [`parse_qoi`] and
-/// [`parse_qoi_header`]. Single source of truth for the per-field
-/// validity tests so a future spec clarification (e.g. a new colorspace
-/// value) propagates to both entry points in one edit.
-fn parse_header_only(input: &[u8]) -> Result<QoiHeader> {
+/// Header-only parser shared by every decode entry point and
+/// [`crate::info`]. Single source of truth for the per-field validity
+/// tests so a future spec clarification (e.g. a new colorspace value)
+/// propagates to every entry point in one edit.
+pub(crate) fn parse_header(input: &[u8]) -> Result<QoiHeader> {
     if input.len() < HEADER_SIZE {
         return Err(Error::invalid("QOI: input shorter than 14-byte header"));
     }
@@ -106,27 +91,29 @@ fn parse_header_only(input: &[u8]) -> Result<QoiHeader> {
 }
 
 /// Decode a complete QOI file (`qoif` header + chunks + end marker)
-/// into a [`QoiImage`].
+/// into a [`QoiImage`] with no resource limits.
 ///
-/// Returns [`QoiError::InvalidData`] for any of:
-/// * input shorter than the 14-byte header,
-/// * leading bytes ≠ `qoif`,
-/// * `channels` field ≠ 3 and ≠ 4,
-/// * `colorspace` field ≠ 0 and ≠ 1,
-/// * width or height = 0,
-/// * any chunk runs past the end of the stream,
-/// * the trailing 8-byte end marker is missing or wrong.
+/// Deprecated: use [`crate::decode`] (1 GiB default decoded-bytes cap)
+/// or [`crate::decode_with`] (explicit [`DecodeOptions`]). Same byte
+/// output and same error set as those, minus the limit checks.
+#[deprecated(note = "use oxideav_qoi::decode (IMAGE_CRATE_API)")]
 pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
+    decode_with(input, &DecodeOptions::default().unlimited())
+}
+
+/// [`crate::decode_with`]: the shared image-building path over
+/// [`decode_into_with`].
+pub(crate) fn decode_with(input: &[u8], opts: &DecodeOptions) -> Result<QoiImage> {
     let mut pixels = Vec::new();
-    let hdr = parse_qoi_into(input, &mut pixels)?;
-    Ok(QoiImage {
-        width: hdr.width,
-        height: hdr.height,
-        channels: hdr.channels,
-        colorspace: hdr.colorspace,
+    let hdr = decode_into_with(input, &mut pixels, opts)?;
+    QoiImage::packed(
+        hdr.width,
+        hdr.height,
+        hdr.channels.pixel_format(),
+        hdr.width as usize * hdr.channels.bytes_per_pixel(),
         pixels,
-        pts: None,
-    })
+    )
+    .map(|img| img.with_color(hdr.colorspace.color_info()))
 }
 
 /// Decode into a caller-owned pixel `Vec<u8>`, reusing its existing
@@ -151,23 +138,36 @@ pub fn parse_qoi(input: &[u8]) -> Result<QoiImage> {
 /// — useful for callers that want to size further downstream
 /// scratch buffers without keeping the full [`QoiImage`] around.
 ///
-/// Both `parse_qoi` and `parse_qoi_into` go through this function,
-/// so the decoder hot path is shared in one place. Errors are
-/// reported via the same [`QoiError`] variants documented on
-/// [`parse_qoi`]; on error, the caller's buffer is left in an
-/// unspecified state (it was cleared on entry, then possibly
-/// resized to `width * height * channels` zero bytes before the
-/// failing chunk arm) and callers should not read from it. The
-/// retained `capacity()` is still valid as scratch for the next
-/// call.
+/// Every decode entry point (`decode`, `decode_with`, `parse_qoi_into`)
+/// goes through one internal hot path, so the decoder logic is
+/// shared in one place. This buffer-reuse variant applies **no**
+/// [`DecodeOptions`] limits (only the physical "chunk stream can't
+/// produce that many pixels" guard), matching its historical
+/// behaviour; callers that want limits use [`crate::decode_with`].
+/// On error, the caller's buffer is left in an unspecified state (it
+/// was cleared on entry, then possibly resized to `width * height *
+/// channels` zero bytes before the failing chunk arm) and callers
+/// should not read from it. The retained `capacity()` is still valid
+/// as scratch for the next call.
 pub fn parse_qoi_into(input: &[u8], pixels: &mut Vec<u8>) -> Result<QoiHeader> {
+    decode_into_with(input, pixels, &DecodeOptions::default().unlimited())
+}
+
+/// The decoder hot path: header, [`DecodeOptions`] limit checks (before
+/// any allocation), chunk walk into `pixels` (cleared first), end
+/// marker. Returns the parsed header.
+pub(crate) fn decode_into_with(
+    input: &[u8],
+    pixels: &mut Vec<u8>,
+    opts: &DecodeOptions,
+) -> Result<QoiHeader> {
     pixels.clear();
     if input.len() < HEADER_SIZE + END_MARKER.len() {
         return Err(Error::invalid(
             "QOI: input shorter than header + end marker",
         ));
     }
-    let hdr = parse_header_only(input)?;
+    let hdr = parse_header(input)?;
     let QoiHeader {
         width,
         height,
@@ -189,6 +189,9 @@ pub fn parse_qoi_into(input: &[u8], pixels: &mut Vec<u8>) -> Result<QoiHeader> {
     let total_bytes = pixel_count
         .checked_mul(bytes_per_pixel)
         .ok_or_else(|| Error::unsupported("QOI: width*height*channels overflows u64"))?;
+    // Caller limits — checked before the usize conversions and long
+    // before `pixels.resize`, so a hostile header never allocates.
+    opts.check(width, height, total_bytes)?;
     // The success of this conversion is the guard; the value itself is
     // not used for sizing (see the bounded reservation below).
     let _total_bytes_usize: usize = total_bytes
@@ -462,6 +465,10 @@ fn fill_run(out: &mut [u8], channels: QoiChannels, p: [u8; 4]) {
 // Registry-side Decoder trait impl
 // ---------------------------------------------------------------------------
 
+/// Framework decoder factory: a [`Decoder`] that runs the standalone
+/// [`crate::decode`] on every packet and bridges the [`QoiImage`] to a
+/// `VideoFrame` (`From<QoiImage> for VideoFrame`, with the packet's
+/// `pts` and the colour signal side-channel).
 #[cfg(feature = "registry")]
 pub fn make_decoder(_params: &CodecParameters) -> oxideav_core::Result<Box<dyn Decoder>> {
     Ok(Box::new(QoiDecoder {
@@ -472,21 +479,15 @@ pub fn make_decoder(_params: &CodecParameters) -> oxideav_core::Result<Box<dyn D
 }
 
 /// A decoded QOI image buffered between `send_packet` and the matching
-/// `receive_frame` / `receive_arena_frame`. We keep the full metadata
-/// (not just a `VideoFrame`) so the arena path can emit a *correct*
-/// `FrameHeader` — the generic default `receive_arena_frame` would
-/// mislabel a packed RGB(A) plane as `Gray8` and report `width =
-/// stride` (= width × channels). Storing the true `(width, height,
-/// pixel_format)` lets us override the arena path with accurate values.
+/// `receive_frame` / `receive_arena_frame`, with the packet's `pts`.
+/// Keeping the full [`QoiImage`] (not just a `VideoFrame`) lets the
+/// arena path emit a *correct* `FrameHeader` — the generic default
+/// `receive_arena_frame` would mislabel a packed RGB(A) plane as
+/// `Gray8` and report `width = stride` (= width × channels).
 #[cfg(feature = "registry")]
 struct PendingFrame {
-    width: u32,
-    height: u32,
-    pixel_format: PixelFormat,
-    /// `width * channels` — the byte stride of the single packed plane.
-    stride: usize,
+    image: QoiImage,
     pts: Option<i64>,
-    pixels: Vec<u8>,
 }
 
 #[cfg(feature = "registry")]
@@ -502,37 +503,24 @@ impl Decoder for QoiDecoder {
         &self.codec_id
     }
     fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
-        let image = parse_qoi(&packet.data)?;
-        let pixel_format = match image.channels {
-            QoiChannels::Rgb => PixelFormat::Rgb24,
-            QoiChannels::Rgba => PixelFormat::Rgba,
-        };
-        let stride = image.width as usize * image.channels as usize;
-        // QOI carries no timestamp of its own (the standalone
-        // `parse_qoi` always yields `pts: None`). Thread the surrounding
+        // The standalone contract path, default limits (1 GiB plane).
+        let image = crate::api::decode(&packet.data)?;
+        // QOI carries no timestamp of its own. Thread the surrounding
         // `Packet`'s `pts` onto the produced frame so a muxer/player
-        // downstream sees the presentation time the container assigned —
-        // a `Packet` without a `pts` (`None`) still produces a frame with
-        // `pts: None`, unchanged.
+        // downstream sees the presentation time the container assigned
+        // — a `Packet` without a `pts` (`None`) still produces a frame
+        // with `pts: None`, unchanged.
         self.pending = Some(PendingFrame {
-            width: image.width,
-            height: image.height,
-            pixel_format,
-            stride,
+            image,
             pts: packet.pts,
-            pixels: image.pixels,
         });
         Ok(())
     }
     fn receive_frame(&mut self) -> oxideav_core::Result<Frame> {
         match self.pending.take() {
-            Some(f) => Ok(Frame::Video(VideoFrame {
-                pts: f.pts,
-                planes: vec![VideoPlane {
-                    stride: f.stride,
-                    data: f.pixels,
-                }],
-            })),
+            Some(f) => Ok(Frame::Video(crate::registry::image_into_video_frame(
+                f.image, f.pts,
+            ))),
             None => {
                 if self.eof {
                     Err(oxideav_core::Error::Eof)
@@ -561,12 +549,18 @@ impl Decoder for QoiDecoder {
         // `width = stride` (width × channels). The one-shot pool drops at
         // end of scope; the returned Frame keeps its leased buffer alive
         // via the Arc<FrameInner>.
-        let total_bytes = f.pixels.len();
+        let pixels = f.image.data();
+        let total_bytes = pixels.len();
         let pool = ArenaPool::with_alloc_count_cap(1, total_bytes.max(1), 4);
         let arena = pool.lease()?;
         let dst = arena.alloc::<u8>(total_bytes)?;
-        dst.copy_from_slice(&f.pixels);
-        let header = FrameHeader::new(f.width, f.height, f.pixel_format, f.pts);
+        dst.copy_from_slice(pixels);
+        let header = FrameHeader::new(
+            f.image.width,
+            f.image.height,
+            crate::registry::to_core_pixel_format(f.image.format),
+            f.pts,
+        );
         FrameInner::new(arena, &[(0, total_bytes)], header)
     }
     fn flush(&mut self) -> oxideav_core::Result<()> {
@@ -615,7 +609,7 @@ mod registry_decoder_tests {
             255, 0, 0, 255, 0, 255, 0, 255, // row 0
             0, 0, 255, 255, 255, 255, 255, 255, // row 1
         ];
-        let bytes = crate::encode_qoi(2, 2, 4, &pixels);
+        let bytes = crate::test_util::encode_px(2, 2, 4, 0, &pixels);
         (bytes, pixels)
     }
 
@@ -647,9 +641,20 @@ mod registry_decoder_tests {
         let Frame::Video(vf) = frame else {
             panic!("expected a video frame");
         };
-        assert_eq!(vf.planes.len(), 1, "QOI decodes to a single packed plane");
+        assert_eq!(
+            vf.image_plane_count(),
+            1,
+            "QOI decodes to a single packed plane"
+        );
         assert_eq!(vf.planes[0].stride, 2 * 4, "stride = width * channels");
         assert_eq!(vf.planes[0].data, pixels, "decoded pixels are lossless");
+        // The colorspace byte rides along as the colour-signal
+        // side-channel (sRGB for byte 0).
+        let sig = vf.color_signal().expect("colour signal attached");
+        assert_eq!(
+            sig,
+            crate::registry::to_color_signal(&crate::ColorInfo::srgb())
+        );
         // Draining again with no further packet is NeedMore (the single
         // pending frame was taken).
         match dec.receive_frame() {
@@ -744,7 +749,7 @@ mod registry_decoder_tests {
         let (bytes_a, pixels_a) = sample_rgba_qoi();
         // A distinct second image (solid green RGB).
         let pixels_b: Vec<u8> = vec![0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0];
-        let bytes_b = crate::encode_qoi(2, 2, 3, &pixels_b);
+        let bytes_b = crate::test_util::encode_px(2, 2, 3, 0, &pixels_b);
 
         let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
             .expect("make_decoder");
@@ -770,7 +775,7 @@ mod registry_decoder_tests {
     #[test]
     fn rgb_packet_decodes_to_three_channel_plane() {
         let pixels: Vec<u8> = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
-        let bytes = crate::encode_qoi(2, 2, 3, &pixels);
+        let bytes = crate::test_util::encode_px(2, 2, 3, 0, &pixels);
         let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
             .expect("make_decoder");
         dec.send_packet(&packet_with(bytes, None))
@@ -866,7 +871,7 @@ mod registry_decoder_tests {
     fn arena_frame_rgb_pixel_format() {
         use oxideav_core::PixelFormat;
         let pixels: Vec<u8> = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
-        let bytes = crate::encode_qoi(2, 2, 3, &pixels);
+        let bytes = crate::test_util::encode_px(2, 2, 3, 0, &pixels);
         let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
             .expect("make_decoder");
         dec.send_packet(&packet_with(bytes, None))

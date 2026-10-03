@@ -40,9 +40,7 @@
 //! qoiformat.org specification mirrored under `docs/image/qoi/`.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_qoi::{
-    encode_qoi_full, encode_qoi_full_into, parse_qoi, parse_qoi_into, END_MARKER, MAGIC,
-};
+use oxideav_qoi::{decode, encode_qoi_full_into, parse_qoi_into, END_MARKER, MAGIC};
 use std::cell::RefCell;
 
 // Match `chunk_walk`'s cap: the decoder rejects any header claiming
@@ -63,7 +61,7 @@ fuzz_target!(|data: &[u8]| {
         // Still drive both decode entry points on the very-short path so
         // the differential covers sub-header inputs too.
         let mut scratch = Vec::new();
-        let a = parse_qoi(data);
+        let a = decode(data);
         let b = parse_qoi_into(data, &mut scratch);
         assert_eq!(
             a.is_ok(),
@@ -92,7 +90,7 @@ fuzz_target!(|data: &[u8]| {
     stream.extend_from_slice(END_MARKER);
 
     // --- Differential 1: parse_qoi vs parse_qoi_into (reused buffer) ---
-    let alloc = parse_qoi(&stream);
+    let alloc = decode(&stream);
     let into_result = DEC_BUF.with(|cell| {
         let mut buf = cell.borrow_mut();
         // Pre-dirty the retained buffer so a missed clear / partial
@@ -110,16 +108,14 @@ fuzz_target!(|data: &[u8]| {
     match (&alloc, &into_result) {
         (Ok(img), Ok((hdr, pixels))) => {
             assert_eq!(
-                img.pixels, *pixels,
+                img.as_bytes().unwrap(),
+                *pixels,
                 "parse_qoi / parse_qoi_into decoded different pixels"
             );
             assert_eq!(img.width, hdr.width, "width disagreement");
             assert_eq!(img.height, hdr.height, "height disagreement");
-            assert_eq!(img.channels, hdr.channels, "channels disagreement");
-            assert_eq!(
-                img.colorspace, hdr.colorspace,
-                "colorspace disagreement"
-            );
+            assert_eq!(img.channels(), hdr.channels, "channels disagreement");
+            assert_eq!(img.colorspace(), hdr.colorspace, "colorspace disagreement");
         }
         (Err(_), Err(_)) => { /* both reject — agreement */ }
         _ => panic!(
@@ -134,15 +130,22 @@ fuzz_target!(|data: &[u8]| {
     // Only when the stream decoded cleanly (we then have a known-good
     // pixel buffer + header to re-encode through both paths).
     if let Ok(img) = &alloc {
-        let ch = img.channels as u8;
-        let cs = img.colorspace as u8;
-        let fresh = encode_qoi_full(img.width, img.height, ch, cs, &img.pixels);
+        let ch = img.channels() as u8;
+        let cs = img.colorspace() as u8;
+        let fresh = encode_px(img.width, img.height, ch, cs, &img.as_bytes().unwrap());
         let reused = ENC_BUF.with(|cell| {
             let mut buf = cell.borrow_mut();
             for b in buf.iter_mut() {
                 *b = 0x55;
             }
-            encode_qoi_full_into(&mut buf, img.width, img.height, ch, cs, &img.pixels);
+            encode_qoi_full_into(
+                &mut buf,
+                img.width,
+                img.height,
+                ch,
+                cs,
+                &img.as_bytes().unwrap(),
+            );
             buf.clone()
         });
         assert_eq!(
@@ -153,3 +156,17 @@ fuzz_target!(|data: &[u8]| {
         );
     }
 });
+
+/// Raw-argument encode over the contract API (`channels` 3 / 4,
+/// `colorspace` 0 / 1) — the shape the pre-contract `encode_qoi_full`
+/// had, so the fixtures below read as before.
+fn encode_px(w: u32, h: u32, channels: u8, colorspace: u8, px: &[u8]) -> Vec<u8> {
+    let opts = oxideav_qoi::EncodeOptions::default()
+        .with_colorspace(oxideav_qoi::QoiColorspace::from_byte(colorspace).expect("colorspace"));
+    match channels {
+        3 => oxideav_qoi::encode_rgb8(w, h, px, &opts),
+        4 => oxideav_qoi::encode_rgba8(w, h, px, &opts),
+        other => panic!("channels must be 3 or 4, got {other}"),
+    }
+    .expect("encode")
+}

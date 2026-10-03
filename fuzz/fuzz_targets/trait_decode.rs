@@ -97,9 +97,16 @@ fuzz_target!(|data: &[u8]| {
             "receive_frame and receive_arena_frame pixel bytes differ"
         );
         assert_eq!(*aw, width, "arena FrameHeader width must be the true width");
-        assert_eq!(*ah, height, "arena FrameHeader height must be the true height");
+        assert_eq!(
+            *ah, height,
+            "arena FrameHeader height must be the true height"
+        );
         assert_eq!(*afmt, pixel_format, "arena FrameHeader pixel format");
-        let bpp = if pixel_format == PixelFormat::Rgba { 4 } else { 3 };
+        let bpp = if pixel_format == PixelFormat::Rgba {
+            4
+        } else {
+            3
+        };
         assert_eq!(*stride, width as usize * bpp, "plane stride");
     }
 });

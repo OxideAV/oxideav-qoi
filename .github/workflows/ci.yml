@@ -5,10 +5,13 @@ name: CI
 # * `ci` (default-features) — uses the OxideAV org-level reusable workflow,
 #   which exercises the registry-integrated path (oxideav-core dep +
 #   Decoder/Encoder trait impls).
-# * `ci-standalone` (no-default-features) — inline job that builds and
-#   tests the lib with `--no-default-features`, exercising the
-#   `oxideav-core`-free standalone path. Catches regressions where
-#   pipeline modules accidentally regrow an oxideav-core import.
+# * `ci-standalone` (no-default-features) — inline job that builds,
+#   tests and clippy-checks the crate with `--no-default-features`,
+#   exercising the `oxideav-core`-free standalone path (the whole
+#   image-crate API contract surface: probe / info / decode* / encode*).
+#   Catches regressions where a module accidentally regrows an
+#   oxideav-core import. Tests that need the framework are gated on
+#   `feature = "registry"` and drop out of this run.
 
 on:
   push:
@@ -33,6 +36,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
@@ -43,4 +48,7 @@ jobs:
         run: cargo build --no-default-features --lib --verbose
 
       - name: Test (no-default-features)
-        run: cargo test --no-default-features --lib --verbose
+        run: cargo test --no-default-features --verbose
+
+      - name: Clippy (no-default-features)
+        run: cargo clippy --no-default-features --all-targets --no-deps -- -D warnings

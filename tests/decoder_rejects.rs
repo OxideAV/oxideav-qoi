@@ -41,7 +41,8 @@
 //!   the end of the stream cannot be decoded.
 
 use oxideav_qoi::{
-    parse_qoi, parse_qoi_header, QoiError, END_MARKER, MAGIC, OP_LUMA, OP_RGB, OP_RGBA, OP_RUN,
+    decode, decode_with, info, DecodeOptions, QoiError, END_MARKER, MAGIC, OP_LUMA, OP_RGB,
+    OP_RGBA, OP_RUN,
 };
 
 /// Assemble a QOI file with a caller-chosen header and chunk body,
@@ -67,11 +68,9 @@ fn valid_one_pixel() -> Vec<u8> {
 }
 
 fn assert_invalid(bytes: &[u8], what: &str) {
-    match parse_qoi(bytes) {
+    match decode(bytes) {
         Err(QoiError::InvalidData(_)) => {}
-        Err(QoiError::Unsupported(msg)) => {
-            panic!("{what}: expected InvalidData, got Unsupported({msg})")
-        }
+        Err(other) => panic!("{what}: expected InvalidData, got {other:?}"),
         Ok(_) => panic!("{what}: malformed stream was accepted"),
     }
 }
@@ -82,8 +81,8 @@ fn assert_invalid(bytes: &[u8], what: &str) {
 
 #[test]
 fn baseline_valid_stream_decodes() {
-    let img = parse_qoi(&valid_one_pixel()).expect("control stream must decode");
-    assert_eq!(&img.pixels[0..4], &[10, 20, 30, 40]);
+    let img = decode(&valid_one_pixel()).expect("control stream must decode");
+    assert_eq!(&img.as_bytes().unwrap()[0..4], &[10, 20, 30, 40]);
 }
 
 // ---------------------------------------------------------------------------
@@ -117,7 +116,7 @@ fn input_shorter_than_header_is_rejected() {
         assert_invalid(truncated, &format!("input of {len} bytes"));
         // The cheap header probe must agree on the same rejection.
         assert!(
-            parse_qoi_header(truncated).is_err(),
+            info(truncated).is_err(),
             "header probe must reject {len}-byte input"
         );
     }
@@ -132,7 +131,7 @@ fn input_with_header_but_no_end_marker_is_rejected() {
     assert_invalid(header_only, "header-only (14 bytes), no end marker");
     // ...yet the header probe accepts exactly the 14-byte header.
     assert!(
-        parse_qoi_header(header_only).is_ok(),
+        info(header_only).is_ok(),
         "header probe must accept a bare 14-byte header"
     );
 }
@@ -146,11 +145,11 @@ fn illegal_channels_value_is_rejected() {
         let bytes = stream(1, 1, ch, 0, &[OP_RGBA, 1, 2, 3, 4]);
         if ch == 3 || ch == 4 {
             // 3/4 are legal; the (RGBA) chunk body decodes fine for both.
-            assert!(parse_qoi(&bytes).is_ok(), "channels={ch} must be legal");
+            assert!(decode(&bytes).is_ok(), "channels={ch} must be legal");
         } else {
             assert_invalid(&bytes, &format!("channels={ch}"));
             assert!(
-                parse_qoi_header(&bytes).is_err(),
+                info(&bytes).is_err(),
                 "header probe must reject channels={ch}"
             );
         }
@@ -164,11 +163,11 @@ fn illegal_colorspace_value_is_rejected() {
         let cs = cs as u8;
         let bytes = stream(1, 1, 4, cs, &[OP_RGBA, 1, 2, 3, 4]);
         if cs == 0 || cs == 1 {
-            assert!(parse_qoi(&bytes).is_ok(), "colorspace={cs} must be legal");
+            assert!(decode(&bytes).is_ok(), "colorspace={cs} must be legal");
         } else {
             assert_invalid(&bytes, &format!("colorspace={cs}"));
             assert!(
-                parse_qoi_header(&bytes).is_err(),
+                info(&bytes).is_err(),
                 "header probe must reject colorspace={cs}"
             );
         }
@@ -179,20 +178,14 @@ fn illegal_colorspace_value_is_rejected() {
 fn zero_width_is_rejected() {
     let bytes = stream(0, 1, 4, 0, &[OP_RGBA, 1, 2, 3, 4]);
     assert_invalid(&bytes, "width = 0");
-    assert!(
-        parse_qoi_header(&bytes).is_err(),
-        "header probe rejects w=0"
-    );
+    assert!(info(&bytes).is_err(), "header probe rejects w=0");
 }
 
 #[test]
 fn zero_height_is_rejected() {
     let bytes = stream(1, 0, 4, 0, &[OP_RGBA, 1, 2, 3, 4]);
     assert_invalid(&bytes, "height = 0");
-    assert!(
-        parse_qoi_header(&bytes).is_err(),
-        "header probe rejects h=0"
-    );
+    assert!(info(&bytes).is_err(), "header probe rejects h=0");
 }
 
 #[test]
@@ -338,11 +331,23 @@ fn oversized_header_with_tiny_body_is_rejected_not_oom() {
     // chunk region can decode at most chunks.len()*62 pixels, far fewer
     // than the header's claim, so the decoder bails before allocating.
     let bytes = stream(65536, 65536, 4, 0, &[OP_RGBA, 1, 2, 3, 4]);
-    assert_invalid(&bytes, "65536x65536 header, 1 pixel of chunks");
+    // With the default `DecodeOptions` the 16 GiB plane trips the 1 GiB
+    // `max_bytes` cap first (also before any allocation).
+    assert!(
+        matches!(decode(&bytes), Err(QoiError::LimitExceeded(_))),
+        "default limits reject the 16 GiB claim"
+    );
+    // With every limit lifted, the physical guard still refuses it.
+    match decode_with(&bytes, &DecodeOptions::default().unlimited()) {
+        Err(QoiError::InvalidData(_)) => {}
+        other => {
+            panic!("65536x65536 header, 1 pixel of chunks: expected InvalidData, got {other:?}")
+        }
+    }
     // The cheap header probe, by contrast, only inspects the 14-byte
     // header — it does NOT walk the chunk stream, so the oversized claim
     // is not its concern and it returns the metadata successfully.
-    let hdr = parse_qoi_header(&bytes).expect("header probe reads metadata only");
+    let hdr = info(&bytes).expect("header probe reads metadata only");
     assert_eq!(hdr.width, 65536);
     assert_eq!(hdr.height, 65536);
 }

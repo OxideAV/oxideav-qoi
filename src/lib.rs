@@ -5,6 +5,37 @@
 //! third-party source code was consulted; the spec PDF is the sole
 //! source of truth.
 //!
+//! ## Standalone use (the image-crate API contract)
+//!
+//! The root exposes the vocabulary every `oxideav-<format>` image crate
+//! shares (`IMAGE_CRATE_API`): [`probe`], [`info`], [`decode`] /
+//! [`decode_with`] / [`decode_rgb8`] / [`decode_rgba8`] /
+//! [`decode_from`], [`encode`] / [`encode_rgb8`] / [`encode_rgba8`] /
+//! [`encode_to`], with [`QoiImage`], [`RgbImage`] / [`RgbaImage`],
+//! [`ImageInfo`], [`DecodeOptions`], [`EncodeOptions`], [`PixelFormat`]
+//! and [`Error`]. It builds with `default-features = false` and no
+//! `oxideav-core`.
+//!
+//! ```
+//! use oxideav_qoi::{EncodeOptions, PixelFormat};
+//!
+//! // Round-trip a 2×2 RGBA image through encode → decode.
+//! let pixels: Vec<u8> = vec![
+//!     255,   0,   0, 255,    0, 255,   0, 255,
+//!       0,   0, 255, 255,  255, 255, 255, 255,
+//! ];
+//! let bytes = oxideav_qoi::encode_rgba8(2, 2, &pixels, &EncodeOptions::default()).unwrap();
+//! assert!(oxideav_qoi::probe(&bytes));
+//!
+//! let info = oxideav_qoi::info(&bytes).unwrap();          // header only
+//! assert_eq!((info.width, info.height, info.format), (2, 2, PixelFormat::Rgba));
+//!
+//! let img = oxideav_qoi::decode(&bytes).unwrap();         // native layout
+//! assert_eq!(img.as_bytes().unwrap(), &pixels[..]);
+//! assert_eq!(img.to_rgb8().len(), 2 * 2 * 3);             // alpha dropped
+//! assert_eq!(oxideav_qoi::decode_rgba8(&bytes).unwrap().data, pixels);
+//! ```
+//!
 //! ## What QOI is
 //!
 //! A small, lossless RGB(A) image format. Files are made of a 14-byte
@@ -34,87 +65,125 @@
 //! Note tags `0xfe` / `0xff` (8-bit) shadow the 2-bit `11` RUN values
 //! 62 / 63, so RUN tops out at 62 instead of 64.
 //!
-//! ## API
+//! ## Colour
 //!
-//! ```
-//! use oxideav_qoi::{parse_qoi, encode_qoi, QoiChannels, QoiColorspace};
+//! QOI's only colour signalling is the header's colorspace byte.
+//! [`QoiImage::color`] / [`ImageInfo::color`] derive from it: byte `0`
+//! (sRGB with linear alpha) → full range, primaries 1, transfer 13,
+//! matrix 0; byte `1` (all channels linear) → transfer 8. The encoder
+//! maps the image's `color` back ([`QoiColorspace::from_color_info`])
+//! unless [`EncodeOptions::colorspace`] forces the byte. Pixel bytes
+//! are never converted.
 //!
-//! // Round-trip a 2×2 RGBA image through encode → decode.
-//! let pixels: Vec<u8> = vec![
-//!     255,   0,   0, 255,    0, 255,   0, 255,
-//!       0,   0, 255, 255,  255, 255, 255, 255,
-//! ];
-//! let bytes = encode_qoi(2, 2, /* channels */ 4, &pixels);
-//! let back = parse_qoi(&bytes).unwrap();
-//! assert_eq!(back.width, 2);
-//! assert_eq!(back.height, 2);
-//! assert_eq!(back.channels, QoiChannels::Rgba);
-//! assert_eq!(back.colorspace, QoiColorspace::SrgbWithLinearAlpha);
-//! assert_eq!(back.pixels, pixels);
-//! ```
+//! ## Depth APIs
 //!
-//! ## Standalone vs registry-integrated
+//! Beyond the contract floor the crate keeps its QOI-specific surface:
+//! the raw header view [`QoiHeader`] / [`QoiChannels`] /
+//! [`QoiColorspace`], the chunk-level walker [`iter_ops`] /
+//! [`iter_ops_strict`] / [`QoiOp`] (with [`QoiOp::write_to`] as its
+//! inverse), [`qoi_hash`], and the buffer-reuse [`parse_qoi_into`] /
+//! [`encode_qoi_into`] / [`encode_qoi_full_into`] variants for tight
+//! decode/encode loops.
 //!
-//! The crate's default `registry` Cargo feature pulls in `oxideav-core`
-//! and exposes the framework `Decoder` / `Encoder` trait surface plus
-//! a [`registry::register`] entry point. The sibling
-//! [`registry::register_containers`] call wires the `.qoi` file
-//! extension into a `ContainerRegistry` so cli-convert / pipeline
-//! output probing can resolve `.qoi` paths through the central
-//! registry instead of a hard-coded list. Disable the feature
-//! (`default-features = false`) for an `oxideav-core`-free build that
-//! still exposes the standalone [`parse_qoi`] / [`encode_qoi`] API
-//! plus crate-local [`QoiImage`] / [`QoiChannels`] / [`QoiColorspace`]
-//! / [`QoiError`] types.
+//! ## Framework use
+//!
+//! The default `registry` Cargo feature pulls in `oxideav-core` and
+//! exposes `register(&mut RuntimeContext)`, `register_codecs` /
+//! `register_containers`, the `make_decoder` / `make_encoder`
+//! factories, and the frame bridge (`From<QoiImage> for VideoFrame`,
+//! `QoiImage::from_video_frame`). The framework `Decoder` / `Encoder`
+//! call the standalone functions above — one implementation.
 
+pub mod api;
 pub mod decoder;
 pub mod encoder;
 pub mod error;
 pub mod image;
 pub mod ops;
+pub mod options;
 #[cfg(feature = "registry")]
 pub mod registry;
 
-/// Codec id for QOI image frames.
+/// Codec identifier string used when registering with the framework.
 pub const CODEC_ID_STR: &str = "qoi";
 
-/// Magic at the start of every QOI file (4 bytes, ASCII `qoif`).
+/// Four-byte magic at the start of every QOI file.
 pub const MAGIC: &[u8; 4] = b"qoif";
 
-/// Total header length: magic (4) + width u32 BE (4) + height u32 BE
-/// (4) + channels u8 (1) + colorspace u8 (1) = 14 bytes.
+/// Total header size in bytes: `qoif` (4) + width (4) + height (4) +
+/// channels (1) + colorspace (1).
 pub const HEADER_SIZE: usize = 14;
 
-/// Trailing 8-byte end marker per the spec.
+/// Eight-byte stream terminator: seven `0x00` followed by one `0x01`.
 pub const END_MARKER: &[u8; 8] = &[0, 0, 0, 0, 0, 0, 0, 1];
 
-/// 8-bit chunk tag for `QOI_OP_RGB` (`11111110`).
+/// `QOI_OP_RGB` tag byte.
 pub const OP_RGB: u8 = 0xFE;
-/// 8-bit chunk tag for `QOI_OP_RGBA` (`11111111`).
+/// `QOI_OP_RGBA` tag byte.
 pub const OP_RGBA: u8 = 0xFF;
-/// 2-bit chunk tag prefix for `QOI_OP_INDEX` (`00xxxxxx`).
+/// `QOI_OP_INDEX` 2-bit tag (in the top two bits).
 pub const OP_INDEX: u8 = 0x00;
-/// 2-bit chunk tag prefix for `QOI_OP_DIFF` (`01xxxxxx`).
+/// `QOI_OP_DIFF` 2-bit tag (in the top two bits).
 pub const OP_DIFF: u8 = 0x40;
-/// 2-bit chunk tag prefix for `QOI_OP_LUMA` (`10xxxxxx`).
+/// `QOI_OP_LUMA` 2-bit tag (in the top two bits).
 pub const OP_LUMA: u8 = 0x80;
-/// 2-bit chunk tag prefix for `QOI_OP_RUN` (`11xxxxxx`).
+/// `QOI_OP_RUN` 2-bit tag (in the top two bits).
 pub const OP_RUN: u8 = 0xC0;
 
-pub use decoder::{parse_qoi, parse_qoi_header, parse_qoi_into};
-#[cfg(feature = "registry")]
-pub use encoder::QoiEncoderOptions;
-pub use encoder::{encode_qoi, encode_qoi_full, encode_qoi_full_into, encode_qoi_into};
-pub use error::{QoiError, Result};
-pub use image::{QoiChannels, QoiColorspace, QoiHeader, QoiImage};
+// ---- the image-crate API contract ------------------------------------------
+pub use api::{
+    decode, decode_from, decode_rgb8, decode_rgba8, decode_with, encode, encode_rgb8, encode_rgba8,
+    encode_to, info, probe,
+};
+pub use error::{Error, QoiError, Result};
+pub use image::{
+    ColorInfo, ColorRange, ImageInfo, Metadata, PixelFormat, Plane, QoiChannels, QoiColorspace,
+    QoiHeader, QoiImage, QoiPixelFormat, RgbImage, RgbaImage,
+};
+pub use options::{DecodeOptions, EncodeOptions};
+
+// ---- QOI depth APIs --------------------------------------------------------
+pub use decoder::parse_qoi_into;
+pub use encoder::{encode_qoi_full_into, encode_qoi_into};
 pub use ops::{iter_ops, iter_ops_strict, qoi_hash, QoiOp, QoiOpIter};
 
+// ---- deprecated pre-contract entry points (one release) --------------------
+#[allow(deprecated)]
+pub use decoder::{parse_qoi, parse_qoi_header};
+#[cfg(feature = "registry")]
+#[allow(deprecated)]
+pub use encoder::QoiEncoderOptions;
+#[allow(deprecated)]
+pub use encoder::{encode_qoi, encode_qoi_full};
+
+// ---- framework adapter -----------------------------------------------------
+#[cfg(feature = "registry")]
+pub use decoder::make_decoder;
+#[cfg(feature = "registry")]
+pub use encoder::make_encoder;
 #[cfg(feature = "registry")]
 pub use registry::{register, register_codecs, register_containers};
 
 #[cfg(feature = "registry")]
 #[doc(hidden)]
 pub use registry::__oxideav_entry;
+
+/// Test-only raw-argument encode over the contract API (`channels` 3 / 4,
+/// `colorspace` 0 / 1) — the shape the pre-contract `encode_qoi_full`
+/// had, so the in-crate fixtures read as before.
+#[cfg(test)]
+pub(crate) mod test_util {
+    pub fn encode_px(w: u32, h: u32, channels: u8, colorspace: u8, px: &[u8]) -> Vec<u8> {
+        let opts = crate::EncodeOptions::default()
+            .with_colorspace(crate::QoiColorspace::from_byte(colorspace).expect("colorspace"));
+        match channels {
+            3 => crate::encode_rgb8(w, h, px, &opts),
+            4 => crate::encode_rgba8(w, h, px, &opts),
+            other => panic!("channels must be 3 or 4, got {other}"),
+        }
+        .expect("encode")
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -142,7 +211,7 @@ mod tests {
     #[test]
     fn header_layout_is_14_bytes() {
         let pixels = rgba_checker(4, 3);
-        let bytes = encode_qoi(4, 3, 4, &pixels);
+        let bytes = crate::test_util::encode_px(4, 3, 4, 0, &pixels);
         assert_eq!(&bytes[0..4], MAGIC);
         assert_eq!(
             u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
@@ -159,19 +228,19 @@ mod tests {
     #[test]
     fn end_marker_present() {
         let pixels = rgba_checker(4, 3);
-        let bytes = encode_qoi(4, 3, 4, &pixels);
+        let bytes = crate::test_util::encode_px(4, 3, 4, 0, &pixels);
         assert_eq!(&bytes[bytes.len() - 8..], END_MARKER);
     }
 
     #[test]
     fn roundtrip_rgba() {
         let pixels = rgba_checker(16, 12);
-        let bytes = encode_qoi(16, 12, 4, &pixels);
-        let back = parse_qoi(&bytes).unwrap();
+        let bytes = crate::test_util::encode_px(16, 12, 4, 0, &pixels);
+        let back = crate::decode(&bytes).unwrap();
         assert_eq!(back.width, 16);
         assert_eq!(back.height, 12);
-        assert_eq!(back.channels, QoiChannels::Rgba);
-        assert_eq!(back.pixels, pixels);
+        assert_eq!(back.channels(), QoiChannels::Rgba);
+        assert_eq!(back.as_bytes().unwrap(), pixels);
     }
 
     #[test]
@@ -185,12 +254,12 @@ mod tests {
                 data.extend_from_slice(&rgb);
             }
         }
-        let bytes = encode_qoi(16, 12, 3, &data);
-        let back = parse_qoi(&bytes).unwrap();
+        let bytes = crate::test_util::encode_px(16, 12, 3, 0, &data);
+        let back = crate::decode(&bytes).unwrap();
         assert_eq!(back.width, 16);
         assert_eq!(back.height, 12);
-        assert_eq!(back.channels, QoiChannels::Rgb);
-        assert_eq!(back.pixels, data);
+        assert_eq!(back.channels(), QoiChannels::Rgb);
+        assert_eq!(back.as_bytes().unwrap(), data);
     }
 
     #[test]
@@ -198,12 +267,12 @@ mod tests {
         // 200 pixels of solid (200,50,25,255). After the first chunk
         // we expect ceil(199/62) = 4 RUN chunks to cover the rest.
         let pixels = [200u8, 50, 25, 255].repeat(200);
-        let bytes = encode_qoi(200, 1, 4, &pixels);
+        let bytes = crate::test_util::encode_px(200, 1, 4, 0, &pixels);
         // Header (14) + at most 5 (first chunk) + 4 RUN bytes (1 each)
         // + end marker (8) = 31 bytes upper bound.
         assert!(bytes.len() <= 31, "encoded length: {}", bytes.len());
-        let back = parse_qoi(&bytes).unwrap();
-        assert_eq!(back.pixels, pixels);
+        let back = crate::decode(&bytes).unwrap();
+        assert_eq!(back.as_bytes().unwrap(), pixels);
     }
 
     #[test]
@@ -216,11 +285,11 @@ mod tests {
         let pixels = vec![
             10, 10, 10, 255, 11, 10, 9, 255, 12, 11, 10, 255, 11, 12, 11, 255,
         ];
-        let bytes = encode_qoi(4, 1, 4, &pixels);
+        let bytes = crate::test_util::encode_px(4, 1, 4, 0, &pixels);
         // Header (14) + 1 LUMA (2) + 3 DIFF (1 each) + marker (8) = 27.
         assert_eq!(bytes.len(), 27);
-        let back = parse_qoi(&bytes).unwrap();
-        assert_eq!(back.pixels, pixels);
+        let back = crate::decode(&bytes).unwrap();
+        assert_eq!(back.as_bytes().unwrap(), pixels);
     }
 
     #[test]
@@ -231,11 +300,11 @@ mod tests {
         // because (10,10,10,255) − (0,0,0,255) is dg=10, the second
         // because (20,20,20,255) − (10,10,10,255) is dg=10.
         let pixels = vec![10, 10, 10, 255, 20, 20, 20, 255];
-        let bytes = encode_qoi(2, 1, 4, &pixels);
+        let bytes = crate::test_util::encode_px(2, 1, 4, 0, &pixels);
         // Header + 2 LUMA (2 each) + marker (8) = 26.
         assert_eq!(bytes.len(), 26);
-        let back = parse_qoi(&bytes).unwrap();
-        assert_eq!(back.pixels, pixels);
+        let back = crate::decode(&bytes).unwrap();
+        assert_eq!(back.as_bytes().unwrap(), pixels);
     }
 
     #[test]
@@ -244,11 +313,11 @@ mod tests {
         // Second pixel (200,50,25,255) jumps too far for LUMA — dg=40
         // is outside ±32 — so it falls through to RGB.
         let pixels = vec![10, 10, 10, 255, 200, 50, 25, 255];
-        let bytes = encode_qoi(2, 1, 4, &pixels);
+        let bytes = crate::test_util::encode_px(2, 1, 4, 0, &pixels);
         // Header + LUMA (2) + RGB (4) + marker (8) = 28.
         assert_eq!(bytes.len(), 28);
-        let back = parse_qoi(&bytes).unwrap();
-        assert_eq!(back.pixels, pixels);
+        let back = crate::decode(&bytes).unwrap();
+        assert_eq!(back.as_bytes().unwrap(), pixels);
     }
 
     #[test]
@@ -256,11 +325,11 @@ mod tests {
         // First pixel (10,10,10,255) picks LUMA. Second pixel changes
         // alpha 255 → 100, which forces RGBA.
         let pixels = vec![10, 10, 10, 255, 10, 10, 10, 100];
-        let bytes = encode_qoi(2, 1, 4, &pixels);
+        let bytes = crate::test_util::encode_px(2, 1, 4, 0, &pixels);
         // Header + LUMA (2) + RGBA (5) + marker (8) = 29.
         assert_eq!(bytes.len(), 29);
-        let back = parse_qoi(&bytes).unwrap();
-        assert_eq!(back.pixels, pixels);
+        let back = crate::decode(&bytes).unwrap();
+        assert_eq!(back.as_bytes().unwrap(), pixels);
     }
 
     #[test]
@@ -270,11 +339,11 @@ mod tests {
         // running array now equals A). Both A and B require RGB
         // (their channel deltas don't fit DIFF or LUMA).
         let pixels = vec![200, 50, 25, 255, 10, 200, 70, 255, 200, 50, 25, 255];
-        let bytes = encode_qoi(3, 1, 4, &pixels);
+        let bytes = crate::test_util::encode_px(3, 1, 4, 0, &pixels);
         // Header + 2 RGB chunks (4 each = 8) + 1 INDEX (1) + marker (8) = 31.
         assert_eq!(bytes.len(), 31);
-        let back = parse_qoi(&bytes).unwrap();
-        assert_eq!(back.pixels, pixels);
+        let back = crate::decode(&bytes).unwrap();
+        assert_eq!(back.as_bytes().unwrap(), pixels);
     }
 
     #[test]
@@ -284,7 +353,7 @@ mod tests {
         // Remaining 99 pixels = ceil(99/62) = 2 RUN chunks (one of 62,
         // one of 37).
         let pixels = [5u8, 6, 7, 255].repeat(100);
-        let bytes = encode_qoi(100, 1, 4, &pixels);
+        let bytes = crate::test_util::encode_px(100, 1, 4, 0, &pixels);
         // = 14 + 2 + 2 + 8 = 26.
         assert_eq!(bytes.len(), 26);
         let runs: Vec<u8> = bytes
@@ -294,38 +363,47 @@ mod tests {
             .collect();
         assert!(runs.contains(&(OP_RUN | (62 - 1))));
         assert!(runs.contains(&(OP_RUN | (37 - 1))));
-        let back = parse_qoi(&bytes).unwrap();
-        assert_eq!(back.pixels, pixels);
+        let back = crate::decode(&bytes).unwrap();
+        assert_eq!(back.as_bytes().unwrap(), pixels);
     }
 
     #[test]
     fn parse_rejects_bad_magic() {
-        let mut bytes = encode_qoi(2, 1, 4, &[0, 0, 0, 255, 0, 0, 0, 255]);
+        let mut bytes = crate::test_util::encode_px(2, 1, 4, 0, &[0, 0, 0, 255, 0, 0, 0, 255]);
         bytes[0] = b'X';
-        assert!(matches!(parse_qoi(&bytes), Err(QoiError::InvalidData(_))));
+        assert!(matches!(
+            crate::decode(&bytes),
+            Err(QoiError::InvalidData(_))
+        ));
     }
 
     #[test]
     fn parse_rejects_bad_channels() {
-        let mut bytes = encode_qoi(2, 1, 4, &[0, 0, 0, 255, 0, 0, 0, 255]);
+        let mut bytes = crate::test_util::encode_px(2, 1, 4, 0, &[0, 0, 0, 255, 0, 0, 0, 255]);
         bytes[12] = 5;
-        assert!(matches!(parse_qoi(&bytes), Err(QoiError::InvalidData(_))));
+        assert!(matches!(
+            crate::decode(&bytes),
+            Err(QoiError::InvalidData(_))
+        ));
     }
 
     #[test]
     fn parse_rejects_bad_colorspace() {
-        let mut bytes = encode_qoi(2, 1, 4, &[0, 0, 0, 255, 0, 0, 0, 255]);
+        let mut bytes = crate::test_util::encode_px(2, 1, 4, 0, &[0, 0, 0, 255, 0, 0, 0, 255]);
         bytes[13] = 7;
-        assert!(matches!(parse_qoi(&bytes), Err(QoiError::InvalidData(_))));
+        assert!(matches!(
+            crate::decode(&bytes),
+            Err(QoiError::InvalidData(_))
+        ));
     }
 
     #[test]
     fn parse_rejects_missing_end_marker() {
-        let bytes = encode_qoi(2, 1, 4, &[0, 0, 0, 255, 0, 0, 0, 255]);
+        let bytes = crate::test_util::encode_px(2, 1, 4, 0, &[0, 0, 0, 255, 0, 0, 0, 255]);
         // Strip the end marker.
         let truncated = &bytes[..bytes.len() - 8];
         assert!(matches!(
-            parse_qoi(truncated),
+            crate::decode(truncated),
             Err(QoiError::InvalidData(_))
         ));
     }
@@ -340,7 +418,10 @@ mod tests {
         bytes.push(4);
         bytes.push(0);
         bytes.extend_from_slice(END_MARKER);
-        assert!(matches!(parse_qoi(&bytes), Err(QoiError::InvalidData(_))));
+        assert!(matches!(
+            crate::decode(&bytes),
+            Err(QoiError::InvalidData(_))
+        ));
     }
 
     #[test]
@@ -367,9 +448,9 @@ mod tests {
     fn single_pixel_image() {
         // Just to make sure the i+1 == pixel_count run-flush kicks in.
         let pixels = vec![1, 2, 3, 4];
-        let bytes = encode_qoi(1, 1, 4, &pixels);
-        let back = parse_qoi(&bytes).unwrap();
-        assert_eq!(back.pixels, pixels);
+        let bytes = crate::test_util::encode_px(1, 1, 4, 0, &pixels);
+        let back = crate::decode(&bytes).unwrap();
+        assert_eq!(back.as_bytes().unwrap(), pixels);
     }
 
     #[test]
@@ -378,11 +459,11 @@ mod tests {
         // chunk is a RUN — exercises the "run flushes at image end"
         // fallback.
         let pixels = [0u8, 0, 0, 255].repeat(5);
-        let bytes = encode_qoi(5, 1, 4, &pixels);
+        let bytes = crate::test_util::encode_px(5, 1, 4, 0, &pixels);
         // Header + 1 RUN of 5 + marker = 23.
         assert_eq!(bytes.len(), 23);
-        let back = parse_qoi(&bytes).unwrap();
-        assert_eq!(back.pixels, pixels);
+        let back = crate::decode(&bytes).unwrap();
+        assert_eq!(back.as_bytes().unwrap(), pixels);
     }
 
     #[test]
@@ -406,8 +487,17 @@ mod tests {
         bytes.push(OP_RGB);
         bytes.extend_from_slice(&[1, 2, 3]);
         bytes.extend_from_slice(END_MARKER);
-        // Must return Err (truncated), NOT abort/OOM.
-        assert!(matches!(parse_qoi(&bytes), Err(QoiError::InvalidData(_))));
+        // Must return Err, NOT abort/OOM. With the default options the
+        // 16 GiB plane trips the 1 GiB `max_bytes` cap first; with the
+        // limits lifted the physical guard reports a truncated stream.
+        assert!(matches!(
+            crate::decode(&bytes),
+            Err(QoiError::LimitExceeded(_))
+        ));
+        assert!(matches!(
+            crate::decode_with(&bytes, &DecodeOptions::default().unlimited()),
+            Err(QoiError::InvalidData(_))
+        ));
     }
 
     #[test]
@@ -425,10 +515,11 @@ mod tests {
             // sequence of RUN chunks (one per 62-pixel block, plus a
             // tail).
             let pixels = [0u8, 0, 0, 255].repeat(w);
-            let bytes = encode_qoi(w as u32, 1, 4, &pixels);
-            let back = parse_qoi(&bytes).expect("decode");
+            let bytes = crate::test_util::encode_px(w as u32, 1, 4, 0, &pixels);
+            let back = crate::decode(&bytes).expect("decode");
             assert_eq!(
-                back.pixels, pixels,
+                back.as_bytes().unwrap(),
+                pixels,
                 "width={w}: round-trip mismatch on solid stream"
             );
         }
@@ -451,9 +542,9 @@ mod tests {
             10, 10, 10, 255, //  INDEX (matches the first pixel's slot)
             10, 10, 10, 100, //  RGBA (alpha changed)
         ];
-        let bytes = encode_qoi(5, 1, 4, &pixels);
-        let back = parse_qoi(&bytes).expect("decode");
-        assert_eq!(back.pixels, pixels);
+        let bytes = crate::test_util::encode_px(5, 1, 4, 0, &pixels);
+        let back = crate::decode(&bytes).expect("decode");
+        assert_eq!(back.as_bytes().unwrap(), pixels);
         // Also confirm width / height land back correctly through the
         // exact-size pre-allocation path.
         assert_eq!(back.width, 5);
@@ -473,7 +564,7 @@ mod tests {
         // is a RUN (no LUMA / DIFF preface).
         for w in [1usize, 61, 62, 63, 124, 125, 200] {
             let pixels = [0u8, 0, 0, 255].repeat(w);
-            let bytes = encode_qoi(w as u32, 1, 4, &pixels);
+            let bytes = crate::test_util::encode_px(w as u32, 1, 4, 0, &pixels);
             // Header (14) + ceil(w / 62) RUN bytes + end marker (8).
             let expected_len = 14 + w.div_ceil(62) + 8;
             assert_eq!(
@@ -481,9 +572,10 @@ mod tests {
                 expected_len,
                 "width={w}: solid-RUN encoded length mismatch"
             );
-            let back = parse_qoi(&bytes).expect("decode");
+            let back = crate::decode(&bytes).expect("decode");
             assert_eq!(
-                back.pixels, pixels,
+                back.as_bytes().unwrap(),
+                pixels,
                 "width={w}: round-trip mismatch on solid stream"
             );
         }
@@ -506,12 +598,12 @@ mod tests {
             10, 10, 10, 255, //  INDEX (matches the first pixel's slot)
             10, 10, 10, 100, //  RGBA (alpha changed)
         ];
-        let bytes = encode_qoi(5, 1, 4, &pixels);
+        let bytes = crate::test_util::encode_px(5, 1, 4, 0, &pixels);
         // Header (14) + LUMA (2) + DIFF (1) + RGB (4) + INDEX (1) +
         // RGBA (5) + end marker (8) = 35.
         assert_eq!(bytes.len(), 35);
-        let back = parse_qoi(&bytes).expect("decode");
-        assert_eq!(back.pixels, pixels);
+        let back = crate::decode(&bytes).expect("decode");
+        assert_eq!(back.as_bytes().unwrap(), pixels);
         assert_eq!(back.width, 5);
         assert_eq!(back.height, 1);
     }
@@ -539,7 +631,7 @@ mod tests {
                 for (i, slot) in pixels.iter_mut().enumerate() {
                     *slot = ((i as u32).wrapping_mul(37) ^ 0x5a) as u8;
                 }
-                let bytes = encode_qoi(w, h, 3, &pixels);
+                let bytes = crate::test_util::encode_px(w, h, 3, 0, &pixels);
                 let chunks = &bytes[14..bytes.len() - 8];
                 // Walk the chunk stream and confirm no leading tag
                 // is OP_RGBA. We don't try to fully decode chunks
@@ -569,8 +661,12 @@ mod tests {
                     };
                 }
                 // Round-trip still holds — sanity.
-                let back = parse_qoi(&bytes).expect("decode");
-                assert_eq!(back.pixels, pixels, "w={w} h={h}: round-trip drift");
+                let back = crate::decode(&bytes).expect("decode");
+                assert_eq!(
+                    back.as_bytes().unwrap(),
+                    pixels,
+                    "w={w} h={h}: round-trip drift"
+                );
             }
         }
     }
@@ -594,7 +690,7 @@ mod tests {
             pixels.push(i.wrapping_mul(17));
             pixels.push(i ^ 0x5a);
         }
-        let bytes = encode_qoi(64, 1, 4, &pixels);
+        let bytes = crate::test_util::encode_px(64, 1, 4, 0, &pixels);
         // We can't assert exactly n*5 + 22 because the encoder may
         // still find some pixel landing in an INDEX slot from a
         // prior cycle. But the dominant chunk MUST be OP_RGBA for
@@ -625,8 +721,8 @@ mod tests {
             "expected the RGBA emit arm to dominate, got {rgba}/{total}"
         );
         // Round-trip still holds.
-        let back = parse_qoi(&bytes).expect("decode");
-        assert_eq!(back.pixels, pixels);
+        let back = crate::decode(&bytes).expect("decode");
+        assert_eq!(back.as_bytes().unwrap(), pixels);
     }
 
     #[test]
@@ -638,7 +734,7 @@ mod tests {
         // stream encodes to a tiny payload) the returned Vec's `len`
         // must equal the encoded size, NOT the upper-bound capacity.
         let pixels = [200u8, 50, 25, 255].repeat(200);
-        let bytes = encode_qoi(200, 1, 4, &pixels);
+        let bytes = crate::test_util::encode_px(200, 1, 4, 0, &pixels);
         // Worst case would be 14 + 200*5 + 8 = 1022. Actual: first
         // pixel is an RGB chunk (4 bytes), then ceil(199/62) = 4 RUN
         // bytes, then end marker — well under the upper bound. The
@@ -653,8 +749,8 @@ mod tests {
         // `vec![0u8; cap]`. Truncation must drop those — otherwise the
         // decoder would see trailing zero bytes between the last chunk
         // and the end marker and reject the stream.
-        let back = parse_qoi(&bytes).expect("decode");
-        assert_eq!(back.pixels, pixels);
+        let back = crate::decode(&bytes).expect("decode");
+        assert_eq!(back.as_bytes().unwrap(), pixels);
     }
 
     #[test]
@@ -666,19 +762,19 @@ mod tests {
         // out (0..4 magic, 4..8 width BE, 8..12 height BE, 12 channels,
         // 13 colorspace).
         let pixels = rgba_checker(16, 12);
-        let bytes = encode_qoi(16, 12, 4, &pixels);
-        let hdr = decoder::parse_qoi_header(&bytes).expect("header parse");
+        let bytes = crate::test_util::encode_px(16, 12, 4, 0, &pixels);
+        let hdr = crate::info(&bytes).expect("header parse");
         assert_eq!(hdr.width, 16);
         assert_eq!(hdr.height, 12);
         assert_eq!(hdr.channels, QoiChannels::Rgba);
         assert_eq!(hdr.colorspace, QoiColorspace::SrgbWithLinearAlpha);
 
         // And the full decode agrees byte-for-byte on the same fields.
-        let img = parse_qoi(&bytes).unwrap();
+        let img = crate::decode(&bytes).unwrap();
         assert_eq!(img.width, hdr.width);
         assert_eq!(img.height, hdr.height);
-        assert_eq!(img.channels, hdr.channels);
-        assert_eq!(img.colorspace, hdr.colorspace);
+        assert_eq!(img.channels(), hdr.channels);
+        assert_eq!(img.colorspace(), hdr.colorspace);
     }
 
     #[test]
@@ -694,14 +790,17 @@ mod tests {
         bytes.push(3); // channels = RGB
         bytes.push(1); // colorspace = all linear
         assert_eq!(bytes.len(), HEADER_SIZE);
-        let hdr = decoder::parse_qoi_header(&bytes).expect("14B header probe");
+        let hdr = crate::info(&bytes).expect("14B header probe");
         assert_eq!(hdr.width, 3);
         assert_eq!(hdr.height, 5);
         assert_eq!(hdr.channels, QoiChannels::Rgb);
         assert_eq!(hdr.colorspace, QoiColorspace::AllLinear);
 
         // Same bytes rejected by `parse_qoi` because no end marker.
-        assert!(matches!(parse_qoi(&bytes), Err(QoiError::InvalidData(_))));
+        assert!(matches!(
+            crate::decode(&bytes),
+            Err(QoiError::InvalidData(_))
+        ));
     }
 
     #[test]
@@ -711,10 +810,7 @@ mod tests {
         for n in 0..HEADER_SIZE {
             let buf = vec![b'q'; n];
             assert!(
-                matches!(
-                    decoder::parse_qoi_header(&buf),
-                    Err(QoiError::InvalidData(_))
-                ),
+                matches!(crate::info(&buf), Err(QoiError::InvalidData(_))),
                 "len={n} should be rejected"
             );
         }
@@ -722,32 +818,23 @@ mod tests {
 
     #[test]
     fn parse_header_rejects_bad_magic() {
-        let mut bytes = encode_qoi(2, 1, 4, &[0, 0, 0, 255, 0, 0, 0, 255]);
+        let mut bytes = crate::test_util::encode_px(2, 1, 4, 0, &[0, 0, 0, 255, 0, 0, 0, 255]);
         bytes[0] = b'X';
-        assert!(matches!(
-            decoder::parse_qoi_header(&bytes),
-            Err(QoiError::InvalidData(_))
-        ));
+        assert!(matches!(crate::info(&bytes), Err(QoiError::InvalidData(_))));
     }
 
     #[test]
     fn parse_header_rejects_bad_channels() {
-        let mut bytes = encode_qoi(2, 1, 4, &[0, 0, 0, 255, 0, 0, 0, 255]);
+        let mut bytes = crate::test_util::encode_px(2, 1, 4, 0, &[0, 0, 0, 255, 0, 0, 0, 255]);
         bytes[12] = 5;
-        assert!(matches!(
-            decoder::parse_qoi_header(&bytes),
-            Err(QoiError::InvalidData(_))
-        ));
+        assert!(matches!(crate::info(&bytes), Err(QoiError::InvalidData(_))));
     }
 
     #[test]
     fn parse_header_rejects_bad_colorspace() {
-        let mut bytes = encode_qoi(2, 1, 4, &[0, 0, 0, 255, 0, 0, 0, 255]);
+        let mut bytes = crate::test_util::encode_px(2, 1, 4, 0, &[0, 0, 0, 255, 0, 0, 0, 255]);
         bytes[13] = 7;
-        assert!(matches!(
-            decoder::parse_qoi_header(&bytes),
-            Err(QoiError::InvalidData(_))
-        ));
+        assert!(matches!(crate::info(&bytes), Err(QoiError::InvalidData(_))));
     }
 
     #[test]
@@ -761,17 +848,11 @@ mod tests {
         bytes.extend_from_slice(&1u32.to_be_bytes());
         bytes.push(4);
         bytes.push(0);
-        assert!(matches!(
-            decoder::parse_qoi_header(&bytes),
-            Err(QoiError::InvalidData(_))
-        ));
+        assert!(matches!(crate::info(&bytes), Err(QoiError::InvalidData(_))));
 
         bytes[4..8].copy_from_slice(&1u32.to_be_bytes());
         bytes[8..12].copy_from_slice(&0u32.to_be_bytes()); // height = 0
-        assert!(matches!(
-            decoder::parse_qoi_header(&bytes),
-            Err(QoiError::InvalidData(_))
-        ));
+        assert!(matches!(crate::info(&bytes), Err(QoiError::InvalidData(_))));
     }
 
     #[test]
@@ -789,12 +870,12 @@ mod tests {
         bytes.push(0);
         // Garbage tail — not a valid chunk stream + end marker.
         bytes.extend_from_slice(&[0xab; 16]);
-        let hdr = decoder::parse_qoi_header(&bytes).expect("header still parses");
+        let hdr = crate::info(&bytes).expect("header still parses");
         assert_eq!(hdr.width, 4);
         assert_eq!(hdr.height, 3);
         // `parse_qoi` on the same bytes fails: the trailing 8 bytes
         // aren't the spec's `00 00 00 00 00 00 00 01` end marker.
-        assert!(parse_qoi(&bytes).is_err());
+        assert!(crate::decode(&bytes).is_err());
     }
 
     #[test]
@@ -832,7 +913,7 @@ mod tests {
             bytes.extend_from_slice(&h.to_be_bytes());
             bytes.push(ch);
             bytes.push(cs);
-            let hdr = decoder::parse_qoi_header(&bytes).expect("synthetic header should parse");
+            let hdr = crate::info(&bytes).expect("synthetic header should parse");
             assert_eq!(hdr.width, w);
             assert_eq!(hdr.height, h);
             assert_eq!(
@@ -857,11 +938,11 @@ mod tests {
     #[test]
     fn colorspace_all_linear_roundtrips() {
         let pixels = vec![10, 20, 30, 255, 40, 50, 60, 255];
-        let bytes = encode_qoi_full(2, 1, 4, /* colorspace */ 1, &pixels);
+        let bytes = crate::test_util::encode_px(2, 1, 4, /* colorspace */ 1, &pixels);
         assert_eq!(bytes[13], 1);
-        let back = parse_qoi(&bytes).unwrap();
-        assert_eq!(back.colorspace, QoiColorspace::AllLinear);
-        assert_eq!(back.pixels, pixels);
+        let back = crate::decode(&bytes).unwrap();
+        assert_eq!(back.colorspace(), QoiColorspace::AllLinear);
+        assert_eq!(back.as_bytes().unwrap(), pixels);
     }
 
     // -----------------------------------------------------------------
@@ -875,7 +956,7 @@ mod tests {
         // marker, same header. The only difference is whether the
         // backing allocation was caller-owned or fresh.
         let pixels = rgba_checker(16, 12);
-        let owned = encode_qoi(16, 12, 4, &pixels);
+        let owned = crate::test_util::encode_px(16, 12, 4, 0, &pixels);
         let mut buf = Vec::new();
         encode_qoi_into(&mut buf, 16, 12, 4, &pixels);
         assert_eq!(owned, buf);
@@ -887,7 +968,7 @@ mod tests {
         // variant. The all-linear (`colorspace=1`) header byte must
         // propagate through the `_into` path unchanged.
         let pixels = vec![10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 100];
-        let owned = encode_qoi_full(3, 1, 4, /* colorspace */ 1, &pixels);
+        let owned = crate::test_util::encode_px(3, 1, 4, /* colorspace */ 1, &pixels);
         let mut buf = Vec::new();
         encode_qoi_full_into(&mut buf, 3, 1, 4, /* colorspace */ 1, &pixels);
         assert_eq!(owned, buf);
@@ -923,11 +1004,11 @@ mod tests {
              calls — defeats the buffer-reuse contract",
             buf.capacity()
         );
-        let small_owned = encode_qoi(4, 4, 4, &small_pixels);
+        let small_owned = crate::test_util::encode_px(4, 4, 4, 0, &small_pixels);
         assert_eq!(buf, small_owned);
 
         // And the big encode is unaffected by the reuse path.
-        let big_owned = encode_qoi(32, 32, 4, &big_pixels);
+        let big_owned = crate::test_util::encode_px(32, 32, 4, 0, &big_pixels);
         assert_eq!(big_bytes, big_owned);
     }
 
@@ -945,8 +1026,8 @@ mod tests {
         // Last 8 bytes are the spec end marker.
         assert_eq!(&buf[buf.len() - 8..], END_MARKER);
         // Round-trip recovers the input pixels.
-        let back = parse_qoi(&buf).unwrap();
-        assert_eq!(back.pixels, pixels);
+        let back = crate::decode(&buf).unwrap();
+        assert_eq!(back.as_bytes().unwrap(), pixels);
     }
 
     #[test]
@@ -955,17 +1036,17 @@ mod tests {
         // difference is that the `_into` path returns the header
         // separately and writes pixels into a caller-owned `Vec`.
         let pixels = rgba_checker(16, 12);
-        let bytes = encode_qoi(16, 12, 4, &pixels);
+        let bytes = crate::test_util::encode_px(16, 12, 4, 0, &pixels);
 
-        let owned = parse_qoi(&bytes).expect("decode");
+        let owned = crate::decode(&bytes).expect("decode");
         let mut pix_buf = Vec::new();
         let hdr = parse_qoi_into(&bytes, &mut pix_buf).expect("decode into");
 
         assert_eq!(hdr.width, owned.width);
         assert_eq!(hdr.height, owned.height);
-        assert_eq!(hdr.channels, owned.channels);
-        assert_eq!(hdr.colorspace, owned.colorspace);
-        assert_eq!(pix_buf, owned.pixels);
+        assert_eq!(hdr.channels, owned.channels());
+        assert_eq!(hdr.colorspace, owned.colorspace());
+        assert_eq!(pix_buf, owned.as_bytes().unwrap());
     }
 
     #[test]
@@ -977,8 +1058,8 @@ mod tests {
         // once per call.
         let big_pixels = rgba_checker(32, 32);
         let small_pixels = rgba_checker(4, 4);
-        let big_bytes = encode_qoi(32, 32, 4, &big_pixels);
-        let small_bytes = encode_qoi(4, 4, 4, &small_pixels);
+        let big_bytes = crate::test_util::encode_px(32, 32, 4, 0, &big_pixels);
+        let small_bytes = crate::test_util::encode_px(4, 4, 4, 0, &small_pixels);
 
         let mut pix_buf = Vec::new();
         let _ = parse_qoi_into(&big_bytes, &mut pix_buf).expect("big decode");
@@ -1007,7 +1088,7 @@ mod tests {
         // than `width * channels`.
         let mut pix_buf = vec![0xAB; 8192];
         let pixels = rgba_checker(8, 6);
-        let bytes = encode_qoi(8, 6, 4, &pixels);
+        let bytes = crate::test_util::encode_px(8, 6, 4, 0, &pixels);
         let hdr = parse_qoi_into(&bytes, &mut pix_buf).expect("decode");
         assert_eq!(hdr.width, 8);
         assert_eq!(hdr.height, 6);
@@ -1024,7 +1105,7 @@ mod tests {
         // variants, same message shape.
         let mut pix_buf = Vec::new();
         // Bad magic.
-        let mut bytes = encode_qoi(2, 1, 4, &[0, 0, 0, 255, 0, 0, 0, 255]);
+        let mut bytes = crate::test_util::encode_px(2, 1, 4, 0, &[0, 0, 0, 255, 0, 0, 0, 255]);
         bytes[0] = b'X';
         assert!(matches!(
             parse_qoi_into(&bytes, &mut pix_buf),
@@ -1037,7 +1118,7 @@ mod tests {
             Err(QoiError::InvalidData(_))
         ));
         // Missing end marker.
-        let bytes = encode_qoi(2, 1, 4, &[0, 0, 0, 255, 0, 0, 0, 255]);
+        let bytes = crate::test_util::encode_px(2, 1, 4, 0, &[0, 0, 0, 255, 0, 0, 0, 255]);
         let truncated = &bytes[..bytes.len() - 8];
         assert!(matches!(
             parse_qoi_into(truncated, &mut pix_buf),

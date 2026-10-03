@@ -40,7 +40,7 @@
 //! ## Strict-mode validation
 //!
 //! [`iter_ops`] runs the same header validation that
-//! [`crate::parse_qoi_header`] does — magic, channels ∈ {3, 4},
+//! [`crate::info`] does — magic, channels ∈ {3, 4},
 //! colorspace ∈ {0, 1}, non-zero dimensions, presence of the
 //! trailing 8-byte end marker — and returns
 //! [`crate::QoiError::InvalidData`] if any of those fail. Inside
@@ -473,7 +473,7 @@ pub fn iter_ops(input: &[u8]) -> Result<(QoiHeader, QoiOpIter<'_>)> {
             "QOI: input shorter than header + end marker",
         ));
     }
-    let hdr = crate::parse_qoi_header(input)?;
+    let hdr = crate::decoder::parse_header(input)?;
     let trailer = &input[input.len() - END_MARKER.len()..];
     if trailer != END_MARKER {
         return Err(Error::invalid("QOI: missing or invalid end marker"));
@@ -525,7 +525,7 @@ pub fn iter_ops_strict(input: &[u8]) -> Result<(QoiHeader, Vec<QoiOp>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{encode_qoi, encode_qoi_full, MAGIC};
+    use crate::MAGIC;
 
     /// Solid run of identical pixels — encoder must emit one
     /// starter chunk for the first pixel (it can't open with a
@@ -539,7 +539,7 @@ mod tests {
     #[test]
     fn op_iter_solid_run() {
         let pixels = [200u8, 50, 25, 255].repeat(200);
-        let bytes = encode_qoi(200, 1, 4, &pixels);
+        let bytes = crate::test_util::encode_px(200, 1, 4, 0, &pixels);
         let (hdr, ops) = iter_ops_strict(&bytes).unwrap();
         assert_eq!(hdr.width, 200);
         assert_eq!(hdr.height, 1);
@@ -592,7 +592,7 @@ mod tests {
         // First pixel: (1, 2, 3, 254). Second pixel: same RGB,
         // alpha 255 (so alpha changed → must be RGBA).
         let pixels: Vec<u8> = vec![1, 2, 3, 254, 1, 2, 3, 255];
-        let bytes = encode_qoi(2, 1, 4, &pixels);
+        let bytes = crate::test_util::encode_px(2, 1, 4, 0, &pixels);
         let (_, ops) = iter_ops_strict(&bytes).unwrap();
         // We don't pin the exact chunk shape (that's encoder
         // implementation detail) but every op is a well-formed
@@ -615,7 +615,7 @@ mod tests {
     fn op_iter_diff_deltas_are_unbiased() {
         // Pixel 1: (50, 100, 150, 255). Pixel 2: (49, 101, 150, 255).
         let pixels: Vec<u8> = vec![50, 100, 150, 255, 49, 101, 150, 255];
-        let bytes = encode_qoi(2, 1, 4, &pixels);
+        let bytes = crate::test_util::encode_px(2, 1, 4, 0, &pixels);
         let (_, ops) = iter_ops_strict(&bytes).unwrap();
         // First op is the RGB / RGBA chunk for pixel 1; second
         // op is the DIFF for pixel 2.
@@ -637,14 +637,14 @@ mod tests {
     /// zero dimensions / short trailer).
     #[test]
     fn iter_ops_rejects_bad_magic() {
-        let mut bytes = encode_qoi(2, 1, 4, &[1, 2, 3, 255, 4, 5, 6, 255]);
+        let mut bytes = crate::test_util::encode_px(2, 1, 4, 0, &[1, 2, 3, 255, 4, 5, 6, 255]);
         bytes[0] = b'X';
         assert!(iter_ops(&bytes).is_err());
     }
 
     #[test]
     fn iter_ops_rejects_bad_end_marker() {
-        let mut bytes = encode_qoi(2, 1, 4, &[1, 2, 3, 255, 4, 5, 6, 255]);
+        let mut bytes = crate::test_util::encode_px(2, 1, 4, 0, &[1, 2, 3, 255, 4, 5, 6, 255]);
         let last = bytes.len() - 1;
         bytes[last] = 2; // valid end marker is `…00 01`
         assert!(iter_ops(&bytes).is_err());
@@ -712,7 +712,7 @@ mod tests {
     #[test]
     fn iter_ops_reports_colorspace_one() {
         let pixels = vec![1, 2, 3, 255, 4, 5, 6, 255];
-        let bytes = encode_qoi_full(2, 1, 4, /* colorspace */ 1, &pixels);
+        let bytes = crate::test_util::encode_px(2, 1, 4, /* colorspace */ 1, &pixels);
         let (hdr, _) = iter_ops(&bytes).unwrap();
         assert_eq!(hdr.colorspace, crate::QoiColorspace::AllLinear);
     }
@@ -801,7 +801,7 @@ mod tests {
             let a = if i % 16 == 0 { (x >> 8) as u8 } else { 255 };
             pixels.extend_from_slice(&[r, g, b, a]);
         }
-        let bytes = encode_qoi(16, 16, 4, &pixels);
+        let bytes = crate::test_util::encode_px(16, 16, 4, 0, &pixels);
         let chunks = &bytes[crate::HEADER_SIZE..bytes.len() - crate::END_MARKER.len()];
         let (_, it) = iter_ops(&bytes).unwrap();
         let mut pos = 0usize;
@@ -1090,7 +1090,7 @@ mod tests {
             let a = if i % 16 == 0 { (x >> 8) as u8 } else { 255 };
             pixels.extend_from_slice(&[r, g, b, a]);
         }
-        let bytes = encode_qoi(16, 16, 4, &pixels);
+        let bytes = crate::test_util::encode_px(16, 16, 4, 0, &pixels);
         let chunks = &bytes[crate::HEADER_SIZE..bytes.len() - crate::END_MARKER.len()];
 
         // Re-serialize every op and confirm we reproduce the chunk

@@ -24,45 +24,97 @@
 //! 3-channel input round-trips byte-for-byte through the encoder.
 
 use crate::decoder::hash;
+use crate::error::{QoiError, Result};
+use crate::image::QoiImage;
+use crate::options::EncodeOptions;
 use crate::{END_MARKER, MAGIC, OP_DIFF, OP_INDEX, OP_LUMA, OP_RGB, OP_RGBA, OP_RUN};
 
 #[cfg(feature = "registry")]
 use oxideav_core::Encoder;
 #[cfg(feature = "registry")]
-use oxideav_core::{CodecId, CodecParameters, Frame, Packet, PixelFormat, TimeBase};
+use oxideav_core::{CodecId, CodecParameters, Frame, Packet, TimeBase};
 
 // ---------------------------------------------------------------------------
 // Public standalone API
 // ---------------------------------------------------------------------------
 
-/// Encode raw RGB or RGBA pixel bytes into a complete QOI file
-/// (`qoif` header + chunks + end marker).
+/// [`crate::encode`]: write `image` as a complete QOI file (`qoif`
+/// header + chunks + end marker).
 ///
-/// `channels` must be 3 or 4. `pixels` must be tightly packed at
-/// `width * height * channels` bytes (no row stride padding).
-/// `colorspace` defaults to 0 (sRGB with linear alpha) — use
-/// [`encode_qoi_full`] to set it explicitly.
+/// The image's geometry was validated by [`QoiImage::new`]; a plane
+/// with row padding is repacked first (QOI streams are tightly
+/// packed). The colorspace byte comes from `opts` or, by default, from
+/// the image's colour ([`crate::QoiColorspace::from_color_info`]).
+/// Metadata cannot be carried and is ignored. Every `Rgb24` / `Rgba`
+/// image encodes; there is no unrepresentable 8-bit RGB(A) input.
+pub(crate) fn encode_image(image: &QoiImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    encode_image_into(&mut buf, image, opts)?;
+    Ok(buf)
+}
+
+/// [`encode_image`] into a caller-owned buffer (cleared first).
+pub(crate) fn encode_image_into(
+    buf: &mut Vec<u8>,
+    image: &QoiImage,
+    opts: &EncodeOptions,
+) -> Result<()> {
+    let channels = image.channels();
+    let colorspace = opts.resolve(image.colorspace());
+    let expected = (image.width as usize)
+        .checked_mul(image.height as usize)
+        .and_then(|p| p.checked_mul(channels.bytes_per_pixel()))
+        .ok_or_else(|| QoiError::unsupported("QOI: width*height*channels overflows usize"))?;
+    let pixels = image.packed_pixels();
+    // `QoiImage::new` guarantees this; a caller who mutated the public
+    // fields afterwards gets an error instead of a panic.
+    if pixels.len() != expected || image.width == 0 || image.height == 0 {
+        return Err(QoiError::invalid(format!(
+            "QOI: pixel buffer holds {} bytes, geometry needs {expected}",
+            pixels.len()
+        )));
+    }
+    encode_qoi_full_into(
+        buf,
+        image.width,
+        image.height,
+        channels.byte(),
+        colorspace.byte(),
+        &pixels,
+    );
+    Ok(())
+}
+
+/// Encode raw RGB or RGBA pixel bytes into a complete QOI file
+/// (`qoif` header + chunks + end marker), colorspace byte `0`.
+///
+/// Deprecated: use [`crate::encode_rgb8`] / [`crate::encode_rgba8`]
+/// (which return `Err` instead of panicking on bad arguments) or
+/// [`crate::encode`] with a [`QoiImage`].
 ///
 /// # Panics
 ///
 /// Panics if `channels` is not 3 or 4, or if `pixels.len() !=
-/// width * height * channels`. (These are programmer errors at the
-/// encode boundary; QOI itself has no error path here — every valid
-/// pixel input encodes successfully.)
+/// width * height * channels`.
+#[deprecated(note = "use oxideav_qoi::encode_rgba8 / encode_rgb8 / encode (IMAGE_CRATE_API)")]
 pub fn encode_qoi(width: u32, height: u32, channels: u8, pixels: &[u8]) -> Vec<u8> {
-    encode_qoi_full(width, height, channels, /* colorspace */ 0, pixels)
+    let mut buf = Vec::new();
+    encode_qoi_full_into(
+        &mut buf, width, height, channels, /* colorspace */ 0, pixels,
+    );
+    buf
 }
 
 /// Encode raw RGB or RGBA pixel bytes with an explicit `colorspace`
 /// header byte (0 = sRGB with linear alpha, 1 = all linear).
 ///
-/// `colorspace` is purely informational — it doesn't affect the
-/// pixel bytes the decoder produces. Use [`encode_qoi`] for the
-/// common case where you don't care.
+/// Deprecated: use [`crate::encode_rgb8`] / [`crate::encode_rgba8`]
+/// with [`EncodeOptions::with_colorspace`].
 ///
 /// # Panics
 ///
 /// See [`encode_qoi`].
+#[deprecated(note = "use oxideav_qoi::encode_rgba8 with EncodeOptions (IMAGE_CRATE_API)")]
 pub fn encode_qoi_full(
     width: u32,
     height: u32,
@@ -78,7 +130,7 @@ pub fn encode_qoi_full(
 /// Encode into a caller-owned `Vec<u8>`, reusing its existing
 /// allocation when large enough.
 ///
-/// Identical to [`encode_qoi`] but writes the encoded bytes into
+/// Identical to the deprecated `encode_qoi` but writes the encoded bytes into
 /// `buf` (which is cleared first) instead of returning a fresh
 /// `Vec<u8>`. Designed for tight encode-in-a-loop callers — image
 /// servers, batch converters, encoder-side benches — that want to
@@ -91,11 +143,14 @@ pub fn encode_qoi_full(
 /// not shrunk).
 ///
 /// `colorspace` defaults to 0 (sRGB with linear alpha) — use
-/// [`encode_qoi_full_into`] to set it explicitly.
+/// [`encode_qoi_full_into`] to set it explicitly. This is a depth /
+/// buffer-reuse API with raw arguments; the contract entry points are
+/// [`crate::encode`] / [`crate::encode_rgb8`] / [`crate::encode_rgba8`].
 ///
 /// # Panics
 ///
-/// See [`encode_qoi`].
+/// Panics if `channels` is not 3 or 4, or if `pixels.len() !=
+/// width * height * channels`.
 pub fn encode_qoi_into(buf: &mut Vec<u8>, width: u32, height: u32, channels: u8, pixels: &[u8]) {
     encode_qoi_full_into(
         buf, width, height, channels, /* colorspace */ 0, pixels,
@@ -105,7 +160,8 @@ pub fn encode_qoi_into(buf: &mut Vec<u8>, width: u32, height: u32, channels: u8,
 /// Encode into a caller-owned `Vec<u8>` with an explicit
 /// `colorspace` header byte.
 ///
-/// Like [`encode_qoi_into`] but exposes the `colorspace` field. The
+/// Like [`encode_qoi_into`] but exposes the `colorspace` byte (0 = sRGB
+/// with linear alpha, 1 = all channels linear). The
 /// buffer is cleared on entry and grown to the worst-case
 /// `14 + width*height*5 + 8` upper bound, then truncated to the
 /// actual encoded size before return — so the existing capacity is
@@ -114,7 +170,7 @@ pub fn encode_qoi_into(buf: &mut Vec<u8>, width: u32, height: u32, channels: u8,
 ///
 /// # Panics
 ///
-/// See [`encode_qoi`].
+/// See [`encode_qoi_into`]; additionally panics if `colorspace > 1`.
 pub fn encode_qoi_full_into(
     buf: &mut Vec<u8>,
     width: u32,
@@ -530,112 +586,53 @@ fn run_scan_emit_rgb(
 // Registry-side Encoder trait impl
 // ---------------------------------------------------------------------------
 
+/// Framework encoder factory: an [`Encoder`] that bridges each
+/// `VideoFrame` to a [`QoiImage`] ([`QoiImage::from_video_frame`]) and
+/// runs the standalone [`crate::encode`] on it. `params.width`,
+/// `height` and `pixel_format` (`Rgb24` / `Rgba`) are required at
+/// `send_frame`; the `colorspace` option (`0` / `srgb` / `1` /
+/// `linear`) forces the header byte, else it follows the frame's
+/// colour signal.
 #[cfg(feature = "registry")]
 pub fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn Encoder>> {
     let mut out_params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
     out_params.width = params.width;
     out_params.height = params.height;
     out_params.pixel_format = params.pixel_format;
-    let colorspace = resolve_colorspace_option(params)?;
-    // Echo the resolved colorspace back through the output params'
-    // option map so a consumer querying `output_params()` sees the
-    // exact header byte the encoder will write, and a re-construction
-    // from those params reproduces the same stream.
-    out_params
-        .options
-        .insert("colorspace", colorspace.to_string());
+    // Schema-validated: an unknown key or out-of-set value is rejected
+    // here, at construction, with a uniform `InvalidData`.
+    let options: EncodeOptions = oxideav_core::parse_options(&params.options)?;
+    // Echo a forced colorspace back through the output params' option
+    // map so a consumer querying `output_params()` sees the exact
+    // header byte the encoder will write, and a re-construction from
+    // those params reproduces the same stream.
+    if let Some(cs) = options.colorspace {
+        out_params
+            .options
+            .insert("colorspace", cs.byte().to_string());
+    }
     Ok(Box::new(QoiEncoder {
         codec_id: CodecId::new(crate::CODEC_ID_STR),
         out_params,
-        colorspace,
+        options,
         pending: None,
         eof: false,
     }))
 }
 
-/// Typed encoder options for QOI.
-///
-/// The framework's [`CodecOptionsStruct`] surface — declaring a static
-/// `SCHEMA` and registering it via `CodecInfo::encoder_options` — is
-/// what makes a codec's tuning knobs discoverable to `oxideav list`,
-/// validatable by the pipeline's JSON-options checker, and parsed with
-/// uniform error messages. QOI's only knob is the informational
-/// `colorspace` header byte.
-///
-/// The `colorspace` option accepts the numeric forms `"0"` / `"1"` and
-/// the symbolic names `"srgb"` (= 0, sRGB with linear alpha) and
-/// `"linear"` (= 1, all channels linear). Unknown keys and out-of-set
-/// values are rejected by [`parse_options`] before this struct's
-/// `apply` runs; absent → the default `0`.
+/// Former name of the registry options schema type; the schema now
+/// lives on [`EncodeOptions`] (`CodecOptionsStruct` impl in
+/// [`crate::registry`]).
 #[cfg(feature = "registry")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct QoiEncoderOptions {
-    /// Resolved QOI colorspace header byte (0 or 1). Defaults to 0
-    /// (sRGB with linear alpha), matching the standalone [`encode_qoi`].
-    pub colorspace: u8,
-}
-
-#[cfg(feature = "registry")]
-impl oxideav_core::CodecOptionsStruct for QoiEncoderOptions {
-    const SCHEMA: &'static [oxideav_core::OptionField] = &[oxideav_core::OptionField {
-        name: "colorspace",
-        // Accept both the numeric and the symbolic spellings; the Enum
-        // kind validates the value against this exact set in
-        // `parse_options` before `apply` is called.
-        kind: oxideav_core::OptionKind::Enum(&["0", "srgb", "1", "linear"]),
-        default: oxideav_core::OptionValue::String(String::new()),
-        help: "QOI colorspace header byte: 0/\"srgb\" (sRGB with linear \
-               alpha) or 1/\"linear\" (all channels linear). Informational \
-               only — does not change pixel bytes.",
-    }];
-
-    fn apply(&mut self, key: &str, value: &oxideav_core::OptionValue) -> oxideav_core::Result<()> {
-        match key {
-            "colorspace" => {
-                self.colorspace = match value.as_str()? {
-                    "0" | "srgb" => 0,
-                    "1" | "linear" => 1,
-                    // Unreachable in practice: the Enum schema already
-                    // restricts the value set. Kept as a defensive arm.
-                    other => {
-                        return Err(oxideav_core::Error::invalid(format!(
-                            "QOI encoder: invalid colorspace {other:?}"
-                        )))
-                    }
-                };
-                Ok(())
-            }
-            // Unreachable: parse_options rejects unknown keys against
-            // SCHEMA before apply runs.
-            other => Err(oxideav_core::Error::invalid(format!(
-                "QOI encoder: unknown option {other:?}"
-            ))),
-        }
-    }
-}
-
-/// Read the optional `colorspace` tuning knob from
-/// [`CodecParameters::options`] and resolve it to the on-wire QOI
-/// header byte (0 = sRGB with linear alpha, 1 = all channels linear).
-///
-/// Goes through the framework's schema-validated [`parse_options`] path
-/// against [`QoiEncoderOptions`], so an unknown option key or an
-/// out-of-set value is rejected with a uniform `InvalidData` error at
-/// encoder construction rather than silently ignored. Absent option →
-/// default 0, matching the standalone [`encode_qoi`].
-#[cfg(feature = "registry")]
-fn resolve_colorspace_option(params: &CodecParameters) -> oxideav_core::Result<u8> {
-    let opts: QoiEncoderOptions = oxideav_core::parse_options(&params.options)?;
-    Ok(opts.colorspace)
-}
+#[deprecated(note = "use oxideav_qoi::EncodeOptions (IMAGE_CRATE_API)")]
+pub type QoiEncoderOptions = EncodeOptions;
 
 #[cfg(feature = "registry")]
 struct QoiEncoder {
     codec_id: CodecId,
     out_params: CodecParameters,
-    /// Resolved QOI colorspace header byte (0 or 1), parsed once at
-    /// construction from the `colorspace` option.
-    colorspace: u8,
+    /// Parsed once at construction from the `colorspace` option.
+    options: EncodeOptions,
     pending: Option<Vec<u8>>,
     eof: bool,
 }
@@ -657,52 +654,8 @@ impl Encoder for QoiEncoder {
                 ))
             }
         };
-        let format = self.out_params.pixel_format.ok_or_else(|| {
-            oxideav_core::Error::invalid("QOI encoder: pixel_format missing in CodecParameters")
-        })?;
-        let width = self.out_params.width.ok_or_else(|| {
-            oxideav_core::Error::invalid("QOI encoder: width missing in CodecParameters")
-        })?;
-        let height = self.out_params.height.ok_or_else(|| {
-            oxideav_core::Error::invalid("QOI encoder: height missing in CodecParameters")
-        })?;
-        let channels: u8 = match format {
-            PixelFormat::Rgba => 4,
-            PixelFormat::Rgb24 => 3,
-            other => {
-                return Err(oxideav_core::Error::invalid(format!(
-                    "QOI encoder: unsupported pixel format {other:?}"
-                )))
-            }
-        };
-        if vf.planes.is_empty() {
-            return Err(oxideav_core::Error::invalid(
-                "QOI encoder: empty frame plane",
-            ));
-        }
-
-        // QOI requires tightly packed pixels (no row padding). Repack
-        // if the source plane has stride > width * channels.
-        let plane = &vf.planes[0];
-        let row_bytes = width as usize * channels as usize;
-        let pixels: Vec<u8> = if plane.stride == row_bytes {
-            plane.data.clone()
-        } else {
-            let mut v = Vec::with_capacity(row_bytes * height as usize);
-            for y in 0..height as usize {
-                let start = y * plane.stride;
-                let end = start + row_bytes;
-                if end > plane.data.len() {
-                    return Err(oxideav_core::Error::invalid(
-                        "QOI encoder: frame plane truncated",
-                    ));
-                }
-                v.extend_from_slice(&plane.data[start..end]);
-            }
-            v
-        };
-
-        let bytes = encode_qoi_full(width, height, channels, self.colorspace, &pixels);
+        let image = QoiImage::from_video_frame(vf, &self.out_params)?;
+        let bytes = encode_image(&image, &self.options)?;
         self.pending = Some(bytes);
         Ok(())
     }
@@ -732,8 +685,8 @@ impl Encoder for QoiEncoder {
 // Trait-side Encoder behavioural tests.
 //
 // The crate's encoder suites (`tests/canonical_encoding.rs`,
-// `tests/property_sweep.rs`, …) drive the standalone `encode_qoi`
-// function. None of them exercises the `oxideav_core::Encoder` trait
+// `tests/property_sweep.rs`, …) drive the standalone `encode` /
+// `encode_rgba8` functions. None of them exercises the `oxideav_core::Encoder` trait
 // impl — the `send_frame` / `receive_packet` state machine, the stride
 // repacking path, the colorspace option, the pixel-format validation,
 // or the keyframe flag on the produced packet. These pin that surface.
@@ -743,7 +696,7 @@ impl Encoder for QoiEncoder {
 #[cfg(all(test, feature = "registry"))]
 mod registry_encoder_tests {
     use super::*;
-    use oxideav_core::{CodecOptions, Error, VideoFrame, VideoPlane};
+    use oxideav_core::{CodecOptions, Error, PixelFormat, VideoFrame, VideoPlane};
 
     fn params(width: u32, height: u32, format: PixelFormat) -> CodecParameters {
         let mut p = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
@@ -770,10 +723,10 @@ mod registry_encoder_tests {
             .expect("send_frame");
         let pkt = enc.receive_packet().expect("receive_packet");
         // The packet is a complete QOI file the standalone decoder reads.
-        let img = crate::parse_qoi(&pkt.data).expect("packet is a valid QOI stream");
+        let img = crate::decode(&pkt.data).expect("packet is a valid QOI stream");
         assert_eq!((img.width, img.height), (2, 2));
-        assert_eq!(img.channels, crate::QoiChannels::Rgba);
-        assert_eq!(img.pixels, pixels, "round-trip is lossless");
+        assert_eq!(img.channels(), crate::QoiChannels::Rgba);
+        assert_eq!(img.as_bytes().unwrap(), pixels, "round-trip is lossless");
         assert!(pkt.flags.keyframe, "every QOI frame is an intra keyframe");
     }
 
@@ -810,8 +763,8 @@ mod registry_encoder_tests {
         let pkt = enc.receive_packet().expect("receive_packet");
         // Header byte 13 is the colorspace.
         assert_eq!(pkt.data[13], 1, "colorspace=1 reaches the header");
-        let img = crate::parse_qoi(&pkt.data).expect("valid stream");
-        assert_eq!(img.colorspace, crate::QoiColorspace::AllLinear);
+        let img = crate::decode(&pkt.data).expect("valid stream");
+        assert_eq!(img.colorspace(), crate::QoiColorspace::AllLinear);
     }
 
     #[test]
@@ -877,7 +830,7 @@ mod registry_encoder_tests {
     #[test]
     fn options_schema_lists_colorspace() {
         use oxideav_core::{CodecOptionsStruct, OptionKind};
-        let schema = QoiEncoderOptions::SCHEMA;
+        let schema = EncodeOptions::SCHEMA;
         assert_eq!(schema.len(), 1, "QOI has exactly one encoder option");
         let f = &schema[0];
         assert_eq!(f.name, "colorspace");
@@ -893,11 +846,14 @@ mod registry_encoder_tests {
     }
 
     #[test]
-    fn typed_options_default_is_colorspace_zero() {
+    fn typed_options_default_derives_colorspace() {
         use oxideav_core::parse_options;
-        let opts: QoiEncoderOptions = parse_options(&CodecOptions::new()).expect("empty parses");
-        assert_eq!(opts.colorspace, 0);
-        assert_eq!(opts, QoiEncoderOptions::default());
+        let opts: EncodeOptions = parse_options(&CodecOptions::new()).expect("empty parses");
+        assert_eq!(opts.colorspace, None);
+        assert_eq!(opts, EncodeOptions::default());
+        let forced: EncodeOptions =
+            parse_options(&CodecOptions::new().set("colorspace", "linear")).expect("parses");
+        assert_eq!(forced.colorspace, Some(crate::QoiColorspace::AllLinear));
     }
 
     #[test]
@@ -923,9 +879,10 @@ mod registry_encoder_tests {
         enc.send_frame(&video_frame(stride, data))
             .expect("send_frame");
         let pkt = enc.receive_packet().expect("receive_packet");
-        let img = crate::parse_qoi(&pkt.data).expect("valid stream");
+        let img = crate::decode(&pkt.data).expect("valid stream");
         assert_eq!(
-            img.pixels, tight,
+            img.as_bytes().unwrap(),
+            tight,
             "padding bytes are stripped, pixels are tight"
         );
     }
@@ -937,7 +894,7 @@ mod registry_encoder_tests {
         let err = enc
             .send_frame(&video_frame(2 * 4, pixels))
             .expect_err("YUV is not a QOI pixel layout");
-        assert!(matches!(err, Error::InvalidData(_)), "got {err:?}");
+        assert!(matches!(err, Error::Unsupported(_)), "got {err:?}");
     }
 
     #[test]
@@ -1058,7 +1015,7 @@ mod registry_encoder_tests {
         let pixels: Vec<u8> = (0..(4 * 4 * 4)).map(|i| (i % 251) as u8).collect();
         let (_, bytes) = trait_roundtrip(4, 4, PixelFormat::Rgba, Some("linear"), pixels);
         assert_eq!(bytes[13], 1, "linear colorspace reached the header");
-        let img = crate::parse_qoi(&bytes).expect("valid stream");
-        assert_eq!(img.colorspace, crate::QoiColorspace::AllLinear);
+        let img = crate::decode(&bytes).expect("valid stream");
+        assert_eq!(img.colorspace(), crate::QoiColorspace::AllLinear);
     }
 }

@@ -28,8 +28,6 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use oxideav_qoi::encode_qoi;
-
 fn xorshift_byte(state: &mut u32) -> u8 {
     *state ^= *state << 13;
     *state ^= *state >> 17;
@@ -118,7 +116,7 @@ fn bench_encode_gradient_rgba_320x240(c: &mut Criterion) {
     let mut g = c.benchmark_group("encode_gradient_rgba_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
     g.bench_function(BenchmarkId::from_parameter("rgba/320x240"), |b| {
-        b.iter(|| encode_qoi(320, 240, 4, criterion::black_box(&pixels)));
+        b.iter(|| encode_px(320, 240, 4, 0, criterion::black_box(&pixels)));
     });
     g.finish();
 }
@@ -129,7 +127,7 @@ fn bench_encode_gradient_rgb24_640x480(c: &mut Criterion) {
     g.throughput(Throughput::Bytes((640 * 480 * 3) as u64));
     g.sample_size(20);
     g.bench_function(BenchmarkId::from_parameter("rgb24/640x480"), |b| {
-        b.iter(|| encode_qoi(640, 480, 3, criterion::black_box(&pixels)));
+        b.iter(|| encode_px(640, 480, 3, 0, criterion::black_box(&pixels)));
     });
     g.finish();
 }
@@ -139,7 +137,7 @@ fn bench_encode_solid_rgba_512x512(c: &mut Criterion) {
     let mut g = c.benchmark_group("encode_solid_rgba_512x512");
     g.throughput(Throughput::Bytes((512 * 512 * 4) as u64));
     g.bench_function(BenchmarkId::from_parameter("rgba/512x512"), |b| {
-        b.iter(|| encode_qoi(512, 512, 4, criterion::black_box(&pixels)));
+        b.iter(|| encode_px(512, 512, 4, 0, criterion::black_box(&pixels)));
     });
     g.finish();
 }
@@ -149,7 +147,7 @@ fn bench_encode_alpha_changing_rgba_320x240(c: &mut Criterion) {
     let mut g = c.benchmark_group("encode_alpha_changing_rgba_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
     g.bench_function(BenchmarkId::from_parameter("rgba/320x240"), |b| {
-        b.iter(|| encode_qoi(320, 240, 4, criterion::black_box(&pixels)));
+        b.iter(|| encode_px(320, 240, 4, 0, criterion::black_box(&pixels)));
     });
     g.finish();
 }
@@ -159,7 +157,7 @@ fn bench_encode_index_friendly_rgba_320x240(c: &mut Criterion) {
     let mut g = c.benchmark_group("encode_index_friendly_rgba_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
     g.bench_function(BenchmarkId::from_parameter("rgba/320x240"), |b| {
-        b.iter(|| encode_qoi(320, 240, 4, criterion::black_box(&pixels)));
+        b.iter(|| encode_px(320, 240, 4, 0, criterion::black_box(&pixels)));
     });
     g.finish();
 }
@@ -173,3 +171,17 @@ criterion_group!(
     bench_encode_index_friendly_rgba_320x240,
 );
 criterion_main!(benches);
+
+/// Raw-argument encode over the contract API (`channels` 3 / 4,
+/// `colorspace` 0 / 1) — the shape the pre-contract `encode_qoi_full`
+/// had, so the fixtures below read as before.
+fn encode_px(w: u32, h: u32, channels: u8, colorspace: u8, px: &[u8]) -> Vec<u8> {
+    let opts = oxideav_qoi::EncodeOptions::default()
+        .with_colorspace(oxideav_qoi::QoiColorspace::from_byte(colorspace).expect("colorspace"));
+    match channels {
+        3 => oxideav_qoi::encode_rgb8(w, h, px, &opts),
+        4 => oxideav_qoi::encode_rgba8(w, h, px, &opts),
+        other => panic!("channels must be 3 or 4, got {other}"),
+    }
+    .expect("encode")
+}

@@ -47,7 +47,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use oxideav_qoi::{encode_qoi, iter_ops_strict, QoiOp};
+use oxideav_qoi::{iter_ops_strict, QoiOp};
 
 /// Cheap deterministic xorshift32 — synthesises "natural-ish" per-pixel
 /// values so the bench inputs aren't trivially compressible / branch-
@@ -186,13 +186,13 @@ fn bench_shape(c: &mut Criterion, name: &str, throughput: u64, bytes: Vec<u8>, s
 
 fn bench_op_write_gradient_rgba_320x240(c: &mut Criterion) {
     let pixels = build_gradient_rgba(320, 240);
-    let bytes = encode_qoi(320, 240, 4, &pixels);
+    let bytes = encode_px(320, 240, 4, 0, &pixels);
     bench_shape(c, "op_write_gradient_rgba_320x240", 320 * 240 * 4, bytes, 0);
 }
 
 fn bench_op_write_gradient_rgb24_640x480(c: &mut Criterion) {
     let pixels = build_gradient_rgb24(640, 480);
-    let bytes = encode_qoi(640, 480, 3, &pixels);
+    let bytes = encode_px(640, 480, 3, 0, &pixels);
     bench_shape(
         c,
         "op_write_gradient_rgb24_640x480",
@@ -204,13 +204,13 @@ fn bench_op_write_gradient_rgb24_640x480(c: &mut Criterion) {
 
 fn bench_op_write_solid_rgba_512x512(c: &mut Criterion) {
     let pixels = build_solid_rgba(512, 512);
-    let bytes = encode_qoi(512, 512, 4, &pixels);
+    let bytes = encode_px(512, 512, 4, 0, &pixels);
     bench_shape(c, "op_write_solid_rgba_512x512", 512 * 512 * 4, bytes, 0);
 }
 
 fn bench_op_write_alpha_changing_rgba_320x240(c: &mut Criterion) {
     let pixels = build_alpha_changing_rgba(320, 240);
-    let bytes = encode_qoi(320, 240, 4, &pixels);
+    let bytes = encode_px(320, 240, 4, 0, &pixels);
     bench_shape(
         c,
         "op_write_alpha_changing_rgba_320x240",
@@ -222,7 +222,7 @@ fn bench_op_write_alpha_changing_rgba_320x240(c: &mut Criterion) {
 
 fn bench_op_write_index_friendly_rgba_320x240(c: &mut Criterion) {
     let pixels = build_index_friendly_rgba(320, 240);
-    let bytes = encode_qoi(320, 240, 4, &pixels);
+    let bytes = encode_px(320, 240, 4, 0, &pixels);
     bench_shape(
         c,
         "op_write_index_friendly_rgba_320x240",
@@ -241,3 +241,17 @@ criterion_group!(
     bench_op_write_index_friendly_rgba_320x240,
 );
 criterion_main!(benches);
+
+/// Raw-argument encode over the contract API (`channels` 3 / 4,
+/// `colorspace` 0 / 1) — the shape the pre-contract `encode_qoi_full`
+/// had, so the fixtures below read as before.
+fn encode_px(w: u32, h: u32, channels: u8, colorspace: u8, px: &[u8]) -> Vec<u8> {
+    let opts = oxideav_qoi::EncodeOptions::default()
+        .with_colorspace(oxideav_qoi::QoiColorspace::from_byte(colorspace).expect("colorspace"));
+    match channels {
+        3 => oxideav_qoi::encode_rgb8(w, h, px, &opts),
+        4 => oxideav_qoi::encode_rgba8(w, h, px, &opts),
+        other => panic!("channels must be 3 or 4, got {other}"),
+    }
+    .expect("encode")
+}

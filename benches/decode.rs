@@ -35,7 +35,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use oxideav_qoi::{encode_qoi, parse_qoi};
+use oxideav_qoi::decode;
 
 /// Cheap deterministic xorshift32 — synthesises "natural-ish" per-pixel
 /// values so the bench inputs aren't trivially compressible / branch-
@@ -136,56 +136,56 @@ fn build_index_friendly_rgba(width: u32, height: u32) -> Vec<u8> {
 
 fn bench_decode_gradient_rgba_320x240(c: &mut Criterion) {
     let pixels = build_gradient_rgba(320, 240);
-    let bytes = encode_qoi(320, 240, 4, &pixels);
+    let bytes = encode_px(320, 240, 4, 0, &pixels);
     let mut g = c.benchmark_group("decode_gradient_rgba_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
     g.bench_function(BenchmarkId::from_parameter("rgba/320x240"), |b| {
-        b.iter(|| parse_qoi(criterion::black_box(&bytes)).expect("decode"));
+        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
 
 fn bench_decode_gradient_rgb24_640x480(c: &mut Criterion) {
     let pixels = build_gradient_rgb24(640, 480);
-    let bytes = encode_qoi(640, 480, 3, &pixels);
+    let bytes = encode_px(640, 480, 3, 0, &pixels);
     let mut g = c.benchmark_group("decode_gradient_rgb24_640x480");
     g.throughput(Throughput::Bytes((640 * 480 * 3) as u64));
     g.sample_size(20);
     g.bench_function(BenchmarkId::from_parameter("rgb24/640x480"), |b| {
-        b.iter(|| parse_qoi(criterion::black_box(&bytes)).expect("decode"));
+        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
 
 fn bench_decode_solid_rgba_512x512(c: &mut Criterion) {
     let pixels = build_solid_rgba(512, 512);
-    let bytes = encode_qoi(512, 512, 4, &pixels);
+    let bytes = encode_px(512, 512, 4, 0, &pixels);
     let mut g = c.benchmark_group("decode_solid_rgba_512x512");
     g.throughput(Throughput::Bytes((512 * 512 * 4) as u64));
     g.bench_function(BenchmarkId::from_parameter("rgba/512x512"), |b| {
-        b.iter(|| parse_qoi(criterion::black_box(&bytes)).expect("decode"));
+        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
 
 fn bench_decode_alpha_changing_rgba_320x240(c: &mut Criterion) {
     let pixels = build_alpha_changing_rgba(320, 240);
-    let bytes = encode_qoi(320, 240, 4, &pixels);
+    let bytes = encode_px(320, 240, 4, 0, &pixels);
     let mut g = c.benchmark_group("decode_alpha_changing_rgba_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
     g.bench_function(BenchmarkId::from_parameter("rgba/320x240"), |b| {
-        b.iter(|| parse_qoi(criterion::black_box(&bytes)).expect("decode"));
+        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
 
 fn bench_decode_index_friendly_rgba_320x240(c: &mut Criterion) {
     let pixels = build_index_friendly_rgba(320, 240);
-    let bytes = encode_qoi(320, 240, 4, &pixels);
+    let bytes = encode_px(320, 240, 4, 0, &pixels);
     let mut g = c.benchmark_group("decode_index_friendly_rgba_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
     g.bench_function(BenchmarkId::from_parameter("rgba/320x240"), |b| {
-        b.iter(|| parse_qoi(criterion::black_box(&bytes)).expect("decode"));
+        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
@@ -199,3 +199,17 @@ criterion_group!(
     bench_decode_index_friendly_rgba_320x240,
 );
 criterion_main!(benches);
+
+/// Raw-argument encode over the contract API (`channels` 3 / 4,
+/// `colorspace` 0 / 1) — the shape the pre-contract `encode_qoi_full`
+/// had, so the fixtures below read as before.
+fn encode_px(w: u32, h: u32, channels: u8, colorspace: u8, px: &[u8]) -> Vec<u8> {
+    let opts = oxideav_qoi::EncodeOptions::default()
+        .with_colorspace(oxideav_qoi::QoiColorspace::from_byte(colorspace).expect("colorspace"));
+    match channels {
+        3 => oxideav_qoi::encode_rgb8(w, h, px, &opts),
+        4 => oxideav_qoi::encode_rgba8(w, h, px, &opts),
+        other => panic!("channels must be 3 or 4, got {other}"),
+    }
+    .expect("encode")
+}

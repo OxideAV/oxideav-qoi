@@ -46,7 +46,7 @@ use std::env;
 use std::io::Write;
 use std::time::Instant;
 
-use oxideav_qoi::{encode_qoi, parse_qoi};
+use oxideav_qoi::decode;
 
 /// xorshift32 — same constant the bench harnesses use so the profile
 /// and bench inputs are byte-identical.
@@ -230,13 +230,19 @@ fn build_pixels(scen: &Scenario) -> Vec<u8> {
 }
 
 fn encode_once(scen: &Scenario, pixels: &[u8]) -> Vec<u8> {
-    encode_qoi(scen.width, scen.height, scen.bytes_per_pixel as u8, pixels)
+    encode_px(
+        scen.width,
+        scen.height,
+        scen.bytes_per_pixel as u8,
+        0,
+        pixels,
+    )
 }
 
 fn decode_once(bytes: &[u8]) -> usize {
-    let img = parse_qoi(bytes).expect("parse_qoi");
+    let img = decode(bytes).expect("parse_qoi");
     // Sum a buffer length to keep the optimiser from dropping the call.
-    img.pixels.len()
+    img.as_bytes().unwrap().len()
 }
 
 fn print_throughput_line(label: &str, scen: &Scenario, iters: u32, elapsed_secs: f64, extra: &str) {
@@ -361,4 +367,18 @@ fn main() {
             std::process::exit(2);
         }
     }
+}
+
+/// Raw-argument encode over the contract API (`channels` 3 / 4,
+/// `colorspace` 0 / 1) — the shape the pre-contract `encode_qoi_full`
+/// had, so the fixtures below read as before.
+fn encode_px(w: u32, h: u32, channels: u8, colorspace: u8, px: &[u8]) -> Vec<u8> {
+    let opts = oxideav_qoi::EncodeOptions::default()
+        .with_colorspace(oxideav_qoi::QoiColorspace::from_byte(colorspace).expect("colorspace"));
+    match channels {
+        3 => oxideav_qoi::encode_rgb8(w, h, px, &opts),
+        4 => oxideav_qoi::encode_rgba8(w, h, px, &opts),
+        other => panic!("channels must be 3 or 4, got {other}"),
+    }
+    .expect("encode")
 }
