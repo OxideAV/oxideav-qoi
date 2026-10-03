@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Image-crate API contract (`IMAGE_CRATE_API`, breaking).** The root
+  now exposes the vocabulary every OxideAV image crate shares: `probe`,
+  `info` → `ImageInfo`, `decode` / `decode_with(&DecodeOptions)`,
+  `decode_rgb8` → `RgbImage`, `decode_rgba8` → `RgbaImage`,
+  `decode_from<R: Read>`, `encode(&QoiImage, &EncodeOptions)`,
+  `encode_rgb8` / `encode_rgba8`, `encode_to<W: Write>`; `PixelFormat`
+  (= `QoiPixelFormat { Rgb24, Rgba }`) and `Error` (= `QoiError`)
+  aliases. No `decode_all`: QOI holds one image.
+- `QoiImage` is reshaped to the contract's image type: `width`,
+  `height`, `format: PixelFormat`, `planes: Vec<Plane>` (one packed
+  plane), `color: ColorInfo`, `metadata: Metadata` (always empty — QOI
+  has none). There is no `palette` field (QOI has no palette) and the
+  old `channels` / `colorspace` / `pixels` / `pts` fields are gone:
+  `channels()` / `colorspace()` are methods derived from `format` /
+  `color`, the pixels are `as_bytes()` / `into_raw()`, and the packet
+  `pts` lives on the framework `VideoFrame` only. Constructors `new` /
+  `packed` / `from_rgb8` / `from_rgba8` validate the plane geometry and
+  return `Result`, so `to_rgb8()` / `to_rgba8()` are infallible.
+- `color` is derived from the header's colorspace byte
+  (`QoiColorspace::color_info`): byte 0 → full range, primaries 1
+  (BT.709 / sRGB), transfer 13 (sRGB), matrix 0; byte 1 → transfer 8
+  (linear). The encoder maps `color` back
+  (`QoiColorspace::from_color_info`: transfer 8 → byte 1, anything else
+  → byte 0) unless `EncodeOptions::colorspace` forces the byte, so
+  `decode(encode(img)) == img` holds for both bytes (pinned by
+  `tests/contract_roundtrip.rs`, 600 random images).
+- `DecodeOptions`: `max_width` / `max_height` / `max_pixels` /
+  `max_bytes` (default 1 GiB of decoded plane) checked against the
+  header before any allocation (`QoiError::LimitExceeded`); `strict` is
+  accepted for contract uniformity and documented as a no-op (QOI has
+  no advisory rules). `decode` therefore refuses a header claiming more
+  than 1 GiB where the old `parse_qoi` fell through to the physical
+  chunk-stream guard; `decode_with(.., &DecodeOptions::default()
+  .unlimited())` restores the old behaviour.
+- `EncodeOptions { colorspace: Option<QoiColorspace> }` replaces the raw
+  `colorspace: u8` argument; it also carries the registry
+  `CodecOptionsStruct` schema (the `colorspace` option now *forces* the
+  byte, and when absent the byte follows the frame's colour signal).
+- `QoiError` gains `LimitExceeded(String)` and `Io(std::io::Error)`
+  (+ `From<std::io::Error>`), is `#[non_exhaustive]`, and no longer
+  derives `Clone` / `PartialEq` / `Eq`.
+- Registry: `make_decoder` / `make_encoder` re-exported at the root;
+  `From<QoiImage> for VideoFrame` (one packed plane plus the
+  colour-signal side-channel — attached on every decoded frame since
+  QOI always signals its colorspace), `QoiImage::from_video_frame(&VideoFrame,
+  &CodecParameters)` and `TryFrom<(&VideoFrame, &CodecParameters)>`;
+  `QoiPixelFormat` ↔ `oxideav_core::PixelFormat` and `ColorInfo` ↔
+  `ColorSignal` mappings. The framework `Decoder` / `Encoder` call the
+  standalone `decode` / `encode`; an unsupported frame pixel format is
+  now `Error::Unsupported` (was `InvalidData`).
+- `ci-standalone` runs the whole `--no-default-features` test suite plus
+  clippy; the `decode` fuzz target drives `probe` / `info` / `decode` /
+  `decode_with` / `decode_rgb8` / `decode_rgba8` / `decode_from` with
+  cross-checks and the lossless round trip.
+- README reordered to the contract (Standalone use, Framework use,
+  Supported layouts, Options, Metadata and colour, Limits, then the QOI
+  specifics) with a 12 MP RGBA decode-speed measurement
+  (`examples/profile_qoi.rs 12mp`).
+
+### Deprecated
+
+- `parse_qoi` → `decode` / `decode_with`; `parse_qoi_header` → `info`;
+  `encode_qoi` / `encode_qoi_full` → `encode_rgb8` / `encode_rgba8`
+  (with `EncodeOptions::with_colorspace`) or `encode`;
+  `QoiEncoderOptions` → `EncodeOptions`. All remain for one release as
+  thin wrappers producing byte-identical output. The buffer-reuse
+  `parse_qoi_into` / `encode_qoi_into` / `encode_qoi_full_into` and the
+  chunk walker (`iter_ops` / `QoiOp` / `qoi_hash`) keep their names as
+  QOI depth APIs.
+
 ### Added
 
 - Round-402 `fuzz/fuzz_targets/into_equiv.rs` — a seventh cargo-fuzz
