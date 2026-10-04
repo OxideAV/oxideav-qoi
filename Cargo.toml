@@ -9,6 +9,8 @@ homepage = "https://github.com/OxideAV/oxideav-qoi"
 authors = ["Mark Karpeles"]
 description = "Pure-Rust QOI (Quite OK Image) reader and writer for the oxideav framework — clean-room implementation of the qoiformat.org one-page specification"
 readme = "README.md"
+# crates.io caps packages at 10 MiB; fixtures and fuzz corpora stay out.
+exclude = ["/tests", "/fuzz"]
 keywords = ["multimedia", "image", "qoi", "codec", "pure-rust"]
 categories = ["multimedia::encoding", "multimedia::images"]
 

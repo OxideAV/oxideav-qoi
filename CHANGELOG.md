@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Cargo.toml` `exclude = ["/tests", "/fuzz"]` (crates.io 10 MiB cap).
+  Fleet-sweep audit (IMAGE_CRATE_API): constructors already fallible,
+  the registry decoder already emits the native `Rgb24` / `Rgba` plane,
+  and the colour signal is stamped on every frame because QOI's header
+  always carries a colourspace byte — no other change.
+
 ## [0.1.5](https://github.com/OxideAV/oxideav-qoi/compare/v0.1.4...v0.1.5) - 2026-10-03
 
 ### Other
