@@ -28,6 +28,7 @@ if oxideav_qoi::probe(&bytes) {
     let out: Vec<u8> = oxideav_qoi::encode_rgba8(w, h, &rgba, &opts)?;
     std::fs::write("out.qoi", out)?;
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 | Item | Signature |
@@ -61,8 +62,10 @@ The default `registry` feature pulls in `oxideav-core`:
 let mut ctx = oxideav_core::RuntimeContext::new();
 oxideav_qoi::register(&mut ctx);          // codec "qoi" + the .qoi extension hint
 // or: register_codecs(&mut ctx.codecs) / register_containers(&mut ctx.containers)
+# let params = oxideav_core::CodecParameters::video(oxideav_core::CodecId::new("qoi"));
 let dec = oxideav_qoi::make_decoder(&params)?;   // oxideav_core::Decoder
 let enc = oxideav_qoi::make_encoder(&params)?;   // oxideav_core::Encoder
+# Ok::<(), oxideav_core::Error>(())
 ```
 
 `From<QoiImage> for VideoFrame` (one packed plane plus the colour-signal
