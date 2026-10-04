@@ -155,23 +155,25 @@ impl QoiImage {
     /// [`QoiImage::new`]); the frame's colour-signal side-channel,
     /// refined over `params.color_signal`, becomes `color` when it
     /// specifies anything (else QOI's sRGB default stands).
-    pub fn from_video_frame(
-        frame: &VideoFrame,
-        params: &CodecParameters,
-    ) -> oxideav_core::Result<Self> {
+    pub fn from_video_frame(frame: &VideoFrame, params: &CodecParameters) -> crate::Result<Self> {
         let width = params
             .width
-            .ok_or_else(|| oxideav_core::Error::invalid("QOI: width missing in CodecParameters"))?;
-        let height = params.height.ok_or_else(|| {
-            oxideav_core::Error::invalid("QOI: height missing in CodecParameters")
+            .ok_or_else(|| QoiError::invalid("QOI: width missing in CodecParameters"))?;
+        let height = params
+            .height
+            .ok_or_else(|| QoiError::invalid("QOI: height missing in CodecParameters"))?;
+        let core_pix = params
+            .pixel_format
+            .ok_or_else(|| QoiError::invalid("QOI: pixel_format missing in CodecParameters"))?;
+        let pix = from_core_pixel_format(core_pix).map_err(|_| {
+            QoiError::unsupported(format!(
+                "QOI: pixel format {core_pix:?} not supported (Rgb24 / Rgba only)"
+            ))
         })?;
-        let pix = from_core_pixel_format(params.pixel_format.ok_or_else(|| {
-            oxideav_core::Error::invalid("QOI: pixel_format missing in CodecParameters")
-        })?)?;
         let plane = frame
             .image_planes()
             .first()
-            .ok_or_else(|| oxideav_core::Error::invalid("QOI: frame has no planes"))?;
+            .ok_or_else(|| QoiError::invalid("QOI: frame has no planes"))?;
         let mut img = QoiImage::packed(width, height, pix, plane.stride, plane.data.clone())?;
         // Per-frame record refines the stream-level description; an
         // entirely unspecified result keeps QOI's sRGB default.
@@ -187,8 +189,8 @@ impl QoiImage {
 }
 
 impl TryFrom<(&VideoFrame, &CodecParameters)> for QoiImage {
-    type Error = oxideav_core::Error;
-    fn try_from((frame, params): (&VideoFrame, &CodecParameters)) -> oxideav_core::Result<Self> {
+    type Error = QoiError;
+    fn try_from((frame, params): (&VideoFrame, &CodecParameters)) -> crate::Result<Self> {
         QoiImage::from_video_frame(frame, params)
     }
 }

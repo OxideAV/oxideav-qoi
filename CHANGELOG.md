@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `QoiImage::from_video_frame` and `TryFrom<(&VideoFrame, &CodecParameters)>`
+  return the crate's `QoiError` instead of `oxideav_core::Error` (contract
+  ruling); the registry encoder maps it. `from_core_pixel_format` /
+  `TryFrom<PixelFormat> for QoiPixelFormat` still yield `oxideav_core::Error`.
+
 ### Added
 
 - `Cargo.toml` `exclude = ["/tests", "/fuzz"]` (crates.io 10 MiB cap).
