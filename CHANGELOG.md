@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/OxideAV/oxideav-qoi/compare/v0.1.5...v0.1.6) - 2026-10-04
+
+### Other
+
+- from_video_frame returns QoiError (contract ruling); adapter maps to core
+- fleet sweep — crates.io exclude; constructors, native output and colour stamping verified
+- README examples use the current registry API
+
 ### Changed
 
 - `QoiImage::from_video_frame` and `TryFrom<(&VideoFrame, &CodecParameters)>`
