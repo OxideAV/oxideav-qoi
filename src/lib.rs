@@ -95,6 +95,8 @@
 //! call the standalone functions above — one implementation.
 
 pub mod api;
+#[cfg(feature = "registry")]
+pub mod container;
 pub mod decoder;
 pub mod encoder;
 pub mod error;

@@ -138,3 +138,9 @@ name = "into_equiv"
 path = "fuzz_targets/into_equiv.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "demux"
+path = "fuzz_targets/demux.rs"
+test = false
+doc = false

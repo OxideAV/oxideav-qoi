@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The `qoi` container** (`oxideav_qoi::container`, installed by
+  `register` / `register_containers` next to the codec): a content
+  probe (`qoif` magic / `.qoi` hint), a demuxer that reads the header
+  and declares one video stream with the native layout (`Rgb24` /
+  `Rgba`) and the colour signal the `colorspace` byte defines (always
+  stamped), emitting the whole file as one packet, and a muxer that
+  writes the encoder's single packet (a second packet is
+  `Unsupported`). The framework (and `oxideav-image`) can now open and
+  write QOI files through the registry. Pinned: registry frames
+  byte-identical to `decode` on the four reference fixtures plus a
+  linear-colourspace encode, stream parameters equal to `info`, the
+  encoder → muxer → demuxer → decoder round trip, hostile inputs.
+- Fuzz target `demux` (file → demuxer → decoder → muxer).
+
 ## [0.1.6](https://github.com/OxideAV/oxideav-qoi/compare/v0.1.5...v0.1.6) - 2026-10-04
 
 ### Other

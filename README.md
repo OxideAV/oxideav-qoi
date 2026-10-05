@@ -60,7 +60,7 @@ The default `registry` feature pulls in `oxideav-core`:
 
 ```rust
 let mut ctx = oxideav_core::RuntimeContext::new();
-oxideav_qoi::register(&mut ctx);          // codec "qoi" + the .qoi extension hint
+oxideav_qoi::register(&mut ctx);          // codec "qoi" + the "qoi" container (demuxer, muxer, probe, .qoi)
 // or: register_codecs(&mut ctx.codecs) / register_containers(&mut ctx.containers)
 # let params = oxideav_core::CodecParameters::video(oxideav_core::CodecId::new("qoi"));
 let dec = oxideav_qoi::make_decoder(&params)?;   // oxideav_core::Decoder
@@ -83,6 +83,16 @@ planes, marks every packet a keyframe, and honours the `colorspace`
 option (`"0"` / `"srgb"` / `"1"` / `"linear"`, discoverable through
 `CodecRegistry::encoder_options_schema`; absent → follows the frame's
 colour signal). Unsupported pixel formats are `Error::Unsupported`.
+
+The `qoi` container (`oxideav_qoi::container`) lets the framework — and
+`oxideav-image` — open and write QOI files through the registry: the
+probe matches the `qoif` magic (or the `.qoi` hint), the demuxer reads
+the 14-byte header and declares one video stream with `width` /
+`height`, the native `pixel_format` (`Rgb24` / `Rgba`) and the colour
+signal the `colorspace` byte defines (always stamped — the format always
+signals it), then emits the whole file as one packet (`pts 0`, time base
+`1/1`); the muxer writes the encoder's single packet through and refuses
+a second one with `Error::Unsupported` (a QOI file holds one image).
 
 ## Supported layouts
 
@@ -253,9 +263,12 @@ cargo run --release --example profile_qoi -- encode 5000
 
 ## Fuzzing
 
-Seven [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
+Eight [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets
 live under `fuzz/`:
 
+* `demux` — the framework path: the bytes as a file into the container
+  demuxer, the packet through the registered decoder (under a 1 Mpx
+  `DecoderLimits` budget), then back through the muxer.
 * `decode` — feeds arbitrary bytes to the whole contract decode
   surface (`probe`, `info`, `decode`, `decode_with` with a tight
   `max_pixels`, `decode_rgb8`, `decode_rgba8`, `decode_from`),

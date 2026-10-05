@@ -10,12 +10,10 @@
 //!   Internally calls [`register_codecs`] and [`register_containers`].
 //! * [`register_codecs`] — registers the QOI codec (decoder + encoder)
 //!   into a [`CodecRegistry`].
-//! * [`register_containers`] — registers the `.qoi` file extension
-//!   against the container name `"qoi"` so cli-convert / pipeline
-//!   probing can resolve a `.qoi` output path through the central
-//!   [`ContainerRegistry`] instead of a hard-coded list. QOI has no
-//!   nested container layer (the file *is* the codec packet), so we
-//!   register no demuxer / muxer / probe — just the extension hint.
+//! * [`register_containers`] — registers the `qoi` container
+//!   ([`crate::container`]: demuxer, muxer, content probe and the `.qoi`
+//!   extension) so the framework opens and writes QOI files through the
+//!   central [`ContainerRegistry`].
 //! * `From<QoiImage> for VideoFrame` and [`QoiImage::from_video_frame`]
 //!   — the frame bridge (one packed plane + the colour-signal
 //!   side-channel), plus the 1:1 [`QoiPixelFormat`] ↔ `PixelFormat`
@@ -270,17 +268,12 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
     );
 }
 
-/// Register the `.qoi` file extension against the container name
-/// `"qoi"` so consumers (cli-convert, pipeline output probing, …) can
-/// resolve a `.qoi` output path through the central
-/// [`ContainerRegistry`] instead of a hard-coded extension list.
-///
-/// QOI is a single-image format with no nested container layer — the
-/// file *is* the codec packet — so we register only the extension
-/// hint here, no demuxer / muxer / probe. Callers that just want the
-/// codec side should keep using [`register_codecs`].
+/// Register the QOI container — demuxer, muxer, content probe and the
+/// `.qoi` extension — so the framework can open and write QOI files
+/// through the registry (see [`crate::container`]). Callers that just
+/// want the codec side should keep using [`register_codecs`].
 pub fn register_containers(reg: &mut ContainerRegistry) {
-    reg.register_extension("qoi", "qoi");
+    crate::container::register(reg);
 }
 
 /// Unified entry point: install every codec and container provided by
