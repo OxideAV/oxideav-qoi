@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/OxideAV/oxideav-qoi/compare/v0.1.6...v0.1.7) - 2026-10-05
+
+### Other
+
+- container demuxer + muxer behind register_containers
+
 ### Added
 
 - **The `qoi` container** (`oxideav_qoi::container`, installed by
