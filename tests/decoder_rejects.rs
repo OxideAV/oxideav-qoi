@@ -41,8 +41,8 @@
 //!   the end of the stream cannot be decoded.
 
 use oxideav_qoi::{
-    decode, decode_with, info, DecodeOptions, QoiError, END_MARKER, MAGIC, OP_LUMA, OP_RGB,
-    OP_RGBA, OP_RUN,
+    DecodeOptions, END_MARKER, MAGIC, OP_LUMA, OP_RGB, OP_RGBA, OP_RUN, QoiError, decode,
+    decode_with, info,
 };
 
 /// Assemble a QOI file with a caller-chosen header and chunk body,
@@ -242,7 +242,7 @@ fn truncated_rgb_chunk_is_rejected() {
     // decoder reaches the RGB arm, needs 3 body bytes, finds 2.
     for body in 0..3 {
         let mut chunks = vec![OP_RGB];
-        chunks.extend(std::iter::repeat(0u8).take(body));
+        chunks.extend(std::iter::repeat_n(0u8, body));
         let bytes = stream(1, 1, 4, 0, &chunks);
         assert_invalid(&bytes, &format!("RGB with {body}/3 body bytes"));
     }
@@ -253,7 +253,7 @@ fn truncated_rgba_chunk_is_rejected() {
     // QOI_OP_RGBA is a 5-byte chunk (tag + r,g,b,a).
     for body in 0..4 {
         let mut chunks = vec![OP_RGBA];
-        chunks.extend(std::iter::repeat(0u8).take(body));
+        chunks.extend(std::iter::repeat_n(0u8, body));
         let bytes = stream(1, 1, 4, 0, &chunks);
         assert_invalid(&bytes, &format!("RGBA with {body}/4 body bytes"));
     }

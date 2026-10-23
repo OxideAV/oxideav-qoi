@@ -49,7 +49,7 @@
 //! reproducible from the printed seed.
 
 use oxideav_qoi::{
-    decode, encode_qoi_full_into, encode_qoi_into, parse_qoi_into, QoiChannels, QoiColorspace,
+    QoiChannels, QoiColorspace, decode, encode_qoi_full_into, encode_qoi_into, parse_qoi_into,
 };
 
 // ---------------------------------------------------------------------------
@@ -362,7 +362,7 @@ fn encode_into_shrinking_reuse_has_no_stale_tail() {
     let mut rng = XorShift32::new(0x0e00_0010);
     let mut enc_buf: Vec<u8> = Vec::new();
 
-    for (label, gen) in GENERATORS {
+    for (label, r#gen) in GENERATORS {
         for iter in 0..40u32 {
             // A large image first, then a strictly smaller one — reuse
             // the SAME enc_buf across both.
@@ -373,8 +373,8 @@ fn encode_into_shrinking_reuse_has_no_stale_tail() {
             let channels = if rng.next_byte() & 1 == 1 { 4 } else { 3 };
             let cs = rng.next_byte() & 1;
 
-            let big_px = gen(&mut rng, (big_w * big_h) as usize, channels);
-            let small_px = gen(&mut rng, (small_w * small_h) as usize, channels);
+            let big_px = r#gen(&mut rng, (big_w * big_h) as usize, channels);
+            let small_px = r#gen(&mut rng, (small_w * small_h) as usize, channels);
 
             // Prime the buffer with the large image, then encode the
             // small one into it.
@@ -400,7 +400,7 @@ fn decode_into_shrinking_reuse_has_no_stale_tail() {
     let mut rng = XorShift32::new(0x0e00_0020);
     let mut dec_buf: Vec<u8> = Vec::new();
 
-    for (label, gen) in GENERATORS {
+    for (label, r#gen) in GENERATORS {
         for iter in 0..40u32 {
             let big_w = rng.range_u32(20, 48);
             let big_h = rng.range_u32(20, 48);
@@ -409,8 +409,8 @@ fn decode_into_shrinking_reuse_has_no_stale_tail() {
             let channels = if rng.next_byte() & 1 == 1 { 4 } else { 3 };
             let cs = rng.next_byte() & 1;
 
-            let big_px = gen(&mut rng, (big_w * big_h) as usize, channels);
-            let small_px = gen(&mut rng, (small_w * small_h) as usize, channels);
+            let big_px = r#gen(&mut rng, (big_w * big_h) as usize, channels);
+            let small_px = r#gen(&mut rng, (small_w * small_h) as usize, channels);
 
             let big_stream = encode_px(big_w, big_h, channels, cs, &big_px);
             let small_stream = encode_px(small_w, small_h, channels, cs, &small_px);
@@ -475,13 +475,13 @@ fn decode_into_reuse_after_rejected_stream_is_clean() {
         },
     ];
 
-    for (label, gen) in GENERATORS {
+    for (label, r#gen) in GENERATORS {
         for iter in 0..30u32 {
             let width = rng.range_u32(1, 32);
             let height = rng.range_u32(1, 32);
             let channels = if rng.next_byte() & 1 == 1 { 4 } else { 3 };
             let cs = rng.next_byte() & 1;
-            let px = gen(&mut rng, (width * height) as usize, channels);
+            let px = r#gen(&mut rng, (width * height) as usize, channels);
             let valid = encode_px(width, height, channels, cs, &px);
 
             for bad in &bad_streams {

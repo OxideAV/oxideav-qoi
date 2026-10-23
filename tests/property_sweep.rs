@@ -72,7 +72,7 @@
 //! (RUN > INDEX > DIFF > LUMA > RGB / RGBA) and the per-chunk
 //! arithmetic in the same pass.
 
-use oxideav_qoi::{decode, QoiChannels, QoiColorspace, END_MARKER, HEADER_SIZE, MAGIC};
+use oxideav_qoi::{END_MARKER, HEADER_SIZE, MAGIC, QoiChannels, QoiColorspace, decode};
 
 // ---------------------------------------------------------------------------
 // Deterministic PRNG

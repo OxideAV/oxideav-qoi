@@ -72,7 +72,7 @@
 //! across thousands of pseudo-random inputs, plus a handful of
 //! hand-built streams that pin the spec's named edge cases.
 
-use oxideav_qoi::{iter_ops, qoi_hash, QoiOp};
+use oxideav_qoi::{QoiOp, iter_ops, qoi_hash};
 
 // ---------------------------------------------------------------------------
 // Deterministic PRNG (same family as property_sweep.rs / the benches).
@@ -315,15 +315,15 @@ fn assert_canonical(seed: u32, label: &str, width: u32, height: u32, channels: u
                 // was already maxed at 62. Two adjacent runs of the same
                 // pixel where the first is < 62 means the encoder failed
                 // to merge them.
-                if let Some(p) = prev_was_run_of {
-                    if p == run_pixel {
-                        assert_eq!(
-                            prev_run_len, 62,
-                            "[{label}] seed={seed} w={width} h={height} ch={channels}: \
+                if let Some(p) = prev_was_run_of
+                    && p == run_pixel
+                {
+                    assert_eq!(
+                        prev_run_len, 62,
+                        "[{label}] seed={seed} w={width} h={height} ch={channels}: \
                              two adjacent RUNs of the same pixel where the first \
                              ({prev_run_len}) was not maxed at 62 — should have merged"
-                        );
-                    }
+                    );
                 }
 
                 // Advance state by `length` copies of `prev`. All land in

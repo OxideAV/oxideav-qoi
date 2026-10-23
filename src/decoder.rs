@@ -66,7 +66,7 @@ pub(crate) fn parse_header(input: &[u8]) -> Result<QoiHeader> {
         other => {
             return Err(Error::invalid(format!(
                 "QOI: header.channels = {other} (must be 3 or 4)"
-            )))
+            )));
         }
     };
     let colorspace = match colorspace_byte {
@@ -75,7 +75,7 @@ pub(crate) fn parse_header(input: &[u8]) -> Result<QoiHeader> {
         other => {
             return Err(Error::invalid(format!(
                 "QOI: header.colorspace = {other} (must be 0 or 1)"
-            )))
+            )));
         }
     };
     if width == 0 || height == 0 {
@@ -449,12 +449,12 @@ fn write_pixel(out: &mut [u8], out_pos: usize, channels: QoiChannels, p: [u8; 4]
 fn fill_run(out: &mut [u8], channels: QoiChannels, p: [u8; 4]) {
     match channels {
         QoiChannels::Rgb => {
-            for px in out.chunks_exact_mut(3) {
+            for px in out.as_chunks_mut::<3>().0 {
                 px.copy_from_slice(&p[..3]);
             }
         }
         QoiChannels::Rgba => {
-            for px in out.chunks_exact_mut(4) {
+            for px in out.as_chunks_mut::<4>().0 {
                 px.copy_from_slice(&p);
             }
         }

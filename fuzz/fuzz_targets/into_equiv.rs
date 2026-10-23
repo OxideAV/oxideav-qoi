@@ -40,7 +40,7 @@
 //! qoiformat.org specification mirrored under `docs/image/qoi/`.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_qoi::{decode, encode_qoi_full_into, parse_qoi_into, END_MARKER, MAGIC};
+use oxideav_qoi::{END_MARKER, MAGIC, decode, encode_qoi_full_into, parse_qoi_into};
 use std::cell::RefCell;
 
 // Match `chunk_walk`'s cap: the decoder rejects any header claiming

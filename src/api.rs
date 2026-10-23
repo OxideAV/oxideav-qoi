@@ -7,12 +7,12 @@
 
 use std::io::{Read, Write};
 
+use crate::MAGIC;
 use crate::decoder;
 use crate::encoder;
 use crate::error::Result;
 use crate::image::{ImageInfo, QoiImage, RgbImage, RgbaImage};
 use crate::options::{DecodeOptions, EncodeOptions};
-use crate::MAGIC;
 
 /// `true` when `bytes` starts with the QOI magic `qoif`. Total,
 /// allocation-free, `false` on short input. Says nothing about the
@@ -108,8 +108,8 @@ pub fn encode_to<W: Write>(image: &QoiImage, opts: &EncodeOptions, mut w: W) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image::{ColorInfo, PixelFormat, QoiChannels, QoiColorspace};
     use crate::QoiError;
+    use crate::image::{ColorInfo, PixelFormat, QoiChannels, QoiColorspace};
 
     fn checker(w: u32, h: u32, bpp: usize) -> Vec<u8> {
         let mut v = Vec::with_capacity(w as usize * h as usize * bpp);
@@ -190,14 +190,21 @@ mod tests {
         assert_eq!((rgba.width, rgba.height), (3, 2));
         assert_eq!(rgba.as_bytes(), &px[..]);
         let rgb = decode_rgb8(&bytes).unwrap();
-        let expect: Vec<u8> = px.chunks_exact(4).flat_map(|p| p[..3].to_vec()).collect();
+        let expect: Vec<u8> = px
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|p| p[..3].to_vec())
+            .collect();
         assert_eq!(rgb.into_raw(), expect);
 
         let px3 = checker(3, 2, 3);
         let bytes = encode_rgb8(3, 2, &px3, &EncodeOptions::default()).unwrap();
         let rgba = decode_rgba8(&bytes).unwrap();
         let expect: Vec<u8> = px3
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect();
         assert_eq!(rgba.data, expect);

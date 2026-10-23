@@ -44,8 +44,8 @@
 //! catch a decoder regression even if the encoder shared the same bug.
 
 use oxideav_qoi::{
-    decode, qoi_hash, QoiChannels, END_MARKER, MAGIC, OP_DIFF, OP_INDEX, OP_LUMA, OP_RGB, OP_RGBA,
-    OP_RUN,
+    END_MARKER, MAGIC, OP_DIFF, OP_INDEX, OP_LUMA, OP_RGB, OP_RGBA, OP_RUN, QoiChannels, decode,
+    qoi_hash,
 };
 
 /// Assemble a minimal single-row RGBA QOI file: `qoif` header for a
@@ -283,7 +283,7 @@ fn run_max_length_62_decodes_to_62_copies() {
         62 * 4,
         "RUN of 62 emits 62 pixels"
     );
-    for px in img.as_bytes().unwrap().chunks_exact(4) {
+    for px in img.as_bytes().unwrap().as_chunks::<4>().0 {
         assert_eq!(px, &[0, 0, 0, 255], "every RUN pixel is the initial prev");
     }
 }

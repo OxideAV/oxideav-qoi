@@ -45,9 +45,9 @@
 //! Run with:
 //!     cargo bench -p oxideav-qoi --bench op_write
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use oxideav_qoi::{iter_ops_strict, QoiOp};
+use oxideav_qoi::{QoiOp, iter_ops_strict};
 
 /// Cheap deterministic xorshift32 — synthesises "natural-ish" per-pixel
 /// values so the bench inputs aren't trivially compressible / branch-

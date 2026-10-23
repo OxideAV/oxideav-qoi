@@ -28,7 +28,7 @@
 //! of waiting on encoder loops.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_qoi::{decode, QoiChannels, QoiColorspace};
+use oxideav_qoi::{QoiChannels, QoiColorspace, decode};
 
 // Hard cap on per-iteration work. 256×256 RGBA = 256 KiB pixel bytes
 // in, ≤1.25 MiB encoded, and ≤256 KiB decoded back out — bounded

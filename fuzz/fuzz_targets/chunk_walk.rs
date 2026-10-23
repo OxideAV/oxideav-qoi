@@ -27,7 +27,7 @@
 //! intentionally discarded.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_qoi::{decode, END_MARKER, MAGIC};
+use oxideav_qoi::{END_MARKER, MAGIC, decode};
 
 // Cap the synthesized image dimensions. The decoder rejects any header
 // claiming more pixels than `chunks.len() * 62` can possibly decode, so

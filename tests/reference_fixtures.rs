@@ -18,7 +18,7 @@
 //! <https://qoiformat.org/qoi_test_images.zip> (the dataset linked
 //! from the QOI homepage). They are not modified.
 
-use oxideav_qoi::{decode, info, QoiChannels, QoiColorspace};
+use oxideav_qoi::{QoiChannels, QoiColorspace, decode, info};
 
 fn check_byte_exact_roundtrip(path: &str, fixture: &[u8]) {
     let img = decode(fixture).unwrap_or_else(|e| panic!("{path}: parse failed: {e:?}"));

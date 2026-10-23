@@ -21,8 +21,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_qoi::{
-    decode, decode_from, decode_rgb8, decode_rgba8, decode_with, encode, info, probe,
-    DecodeOptions, EncodeOptions, QoiError,
+    DecodeOptions, EncodeOptions, QoiError, decode, decode_from, decode_rgb8, decode_rgba8,
+    decode_with, encode, info, probe,
 };
 
 fuzz_target!(|data: &[u8]| {

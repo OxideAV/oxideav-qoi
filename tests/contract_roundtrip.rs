@@ -19,8 +19,8 @@
 //! failure is reproducible without a `proptest` / `quickcheck` dev-dep.
 
 use oxideav_qoi::{
-    decode, decode_from, decode_rgb8, decode_rgba8, encode, encode_rgb8, encode_rgba8, encode_to,
-    info, probe, ColorInfo, EncodeOptions, PixelFormat, QoiColorspace, QoiImage,
+    ColorInfo, EncodeOptions, PixelFormat, QoiColorspace, QoiImage, decode, decode_from,
+    decode_rgb8, decode_rgba8, encode, encode_rgb8, encode_rgba8, encode_to, info, probe,
 };
 
 struct Rng(u32);
@@ -56,8 +56,16 @@ enum Gen {
     AlphaToggle,
 }
 
-fn pixel(gen: Gen, rng: &mut Rng, x: u32, y: u32, w: u32, h: u32, state: &mut [u8; 4]) -> [u8; 4] {
-    match gen {
+fn pixel(
+    r#gen: Gen,
+    rng: &mut Rng,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    state: &mut [u8; 4],
+) -> [u8; 4] {
+    match r#gen {
         Gen::Noise => [rng.byte(), rng.byte(), rng.byte(), rng.byte()],
         Gen::Gradient => [
             ((x * 255) / w.max(1)) as u8,
@@ -95,7 +103,7 @@ fn pixel(gen: Gen, rng: &mut Rng, x: u32, y: u32, w: u32, h: u32, state: &mut [u
 
 /// Build an image: `bpp` 3 or 4, `pad` extra bytes per row (0 = tight).
 fn build(
-    gen: Gen,
+    r#gen: Gen,
     rng: &mut Rng,
     w: u32,
     h: u32,
@@ -108,7 +116,7 @@ fn build(
     let mut state = [0u8; 4];
     for y in 0..h {
         for x in 0..w {
-            let p = pixel(gen, rng, x, y, w, h, &mut state);
+            let p = pixel(r#gen, rng, x, y, w, h, &mut state);
             data.extend_from_slice(&p[..bpp]);
         }
         for _ in 0..pad {
@@ -148,7 +156,7 @@ fn decode_encode_identity_over_random_images() {
         Gen::AlphaToggle,
     ];
     let mut cases = 0usize;
-    for (gi, gen) in gens.iter().enumerate() {
+    for (gi, r#gen) in gens.iter().enumerate() {
         let mut rng = Rng(0xC0FF_EE00 ^ (gi as u32 + 1).wrapping_mul(0x9E37_79B9));
         for case in 0..120 {
             let w = 1 + rng.below(64);
@@ -164,7 +172,7 @@ fn decode_encode_identity_over_random_images() {
             } else {
                 0
             };
-            let img = build(*gen, &mut rng, w, h, bpp, pad, cs);
+            let img = build(*r#gen, &mut rng, w, h, bpp, pad, cs);
             let ctx = format!("{gen:?} case {case}: {w}x{h} bpp={bpp} cs={cs:?} pad={pad}");
 
             let bytes = encode(&img, &EncodeOptions::default()).expect("encode");
@@ -192,12 +200,18 @@ fn decode_encode_identity_over_random_images() {
             let rgb = decode_rgb8(&bytes).expect("rgb8");
             assert_eq!(rgb.data, img.to_rgb8(), "{ctx}: decode_rgb8 == to_rgb8");
             if bpp == 4 {
-                for (p4, p3) in rgba.data.chunks_exact(4).zip(rgb.data.chunks_exact(3)) {
+                for (p4, p3) in rgba
+                    .data
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(rgb.data.as_chunks::<3>().0)
+                {
                     assert_eq!(&p4[..3], p3, "{ctx}: rgb8 is rgba8 minus alpha");
                 }
             } else {
                 assert!(
-                    rgba.data.chunks_exact(4).all(|p| p[3] == 255),
+                    rgba.data.as_chunks::<4>().0.iter().all(|p| p[3] == 255),
                     "{ctx}: Rgb24 gets opaque alpha"
                 );
             }

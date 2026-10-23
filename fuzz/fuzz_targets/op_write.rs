@@ -37,7 +37,7 @@
 //!    prefix of ops.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_qoi::{iter_ops, iter_ops_strict, QoiOp, END_MARKER, HEADER_SIZE, MAGIC};
+use oxideav_qoi::{END_MARKER, HEADER_SIZE, MAGIC, QoiOp, iter_ops, iter_ops_strict};
 
 const MAX_DIM: u32 = 64;
 

@@ -671,7 +671,12 @@ impl QoiImage {
             match self.format {
                 PixelFormat::Rgba => dst.copy_from_slice(row),
                 PixelFormat::Rgb24 => {
-                    for (s, px) in row.chunks_exact(3).zip(dst.chunks_exact_mut(4)) {
+                    for (s, px) in row
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .zip(dst.as_chunks_mut::<4>().0)
+                    {
                         px[0] = s[0];
                         px[1] = s[1];
                         px[2] = s[2];
@@ -702,7 +707,12 @@ impl QoiImage {
             match self.format {
                 PixelFormat::Rgb24 => dst.copy_from_slice(row),
                 PixelFormat::Rgba => {
-                    for (s, px) in row.chunks_exact(4).zip(dst.chunks_exact_mut(3)) {
+                    for (s, px) in row
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(dst.as_chunks_mut::<3>().0)
+                    {
                         px.copy_from_slice(&s[..3]);
                     }
                 }

@@ -13,7 +13,7 @@ use oxideav_core::{
 };
 use oxideav_qoi::container;
 use oxideav_qoi::registry::to_color_signal;
-use oxideav_qoi::{decode, encode, info, ColorInfo, EncodeOptions, QoiImage, CODEC_ID_STR};
+use oxideav_qoi::{CODEC_ID_STR, ColorInfo, EncodeOptions, QoiImage, decode, encode, info};
 
 const EDGECASE: &[u8] = include_bytes!("fixtures/edgecase.qoi");
 const LOGO: &[u8] = include_bytes!("fixtures/qoi_logo.qoi");
@@ -146,10 +146,11 @@ fn probe_names_qoi_from_magic_alone_and_with_hint_and_rejects_foreign_files() {
         b"qoiX\0\0\0\x01\0\0\0\x01\x03\x00".to_vec(),
     ] {
         let mut cur = Cursor::new(foreign.clone());
-        assert!(ctx
-            .containers
-            .probe_input(&mut cur as &mut dyn oxideav_core::ReadSeek, None)
-            .is_err());
+        assert!(
+            ctx.containers
+                .probe_input(&mut cur as &mut dyn oxideav_core::ReadSeek, None)
+                .is_err()
+        );
         let reader: Box<dyn oxideav_core::ReadSeek> = Box::new(Cursor::new(foreign));
         assert!(container::open_demuxer(reader, &ctx.codecs).is_err());
     }
@@ -302,9 +303,10 @@ fn muxer_rejects_wrong_streams_second_packets_and_non_qoi_payloads() {
     assert!(m.write_packet(&pkt).is_err(), "write_header not called");
     m.write_header().unwrap();
     assert!(m.write_trailer().is_err(), "no packet written");
-    assert!(m
-        .write_packet(&Packet::new(0, TimeBase::new(1, 1), b"not a qoi".to_vec()))
-        .is_err());
+    assert!(
+        m.write_packet(&Packet::new(0, TimeBase::new(1, 1), b"not a qoi".to_vec()))
+            .is_err()
+    );
     m.write_packet(&pkt).unwrap();
     // A second image: QOI holds one, said the same way Layer 1 would.
     assert!(matches!(
@@ -373,9 +375,10 @@ fn hostile_inputs_fail_cleanly() {
         .codecs
         .first_decoder(&CodecParameters::video(CodecId::new(CODEC_ID_STR)))
         .unwrap();
-    assert!(dec
-        .send_packet(&Packet::new(0, TimeBase::new(1, 1), Vec::new()))
-        .is_err());
+    assert!(
+        dec.send_packet(&Packet::new(0, TimeBase::new(1, 1), Vec::new()))
+            .is_err()
+    );
     assert!(matches!(dec.receive_frame(), Err(CoreError::NeedMore)));
     let _ = ColorSignal::unspecified();
 }

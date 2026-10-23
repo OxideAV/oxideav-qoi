@@ -927,11 +927,13 @@ mod tests {
         assert_eq!(QoiOp::Run { length: 62 }.tag(), OP_RUN | 61);
         assert_eq!(QoiOp::Run { length: 1 }.tag(), OP_RUN);
 
-        assert!(QoiOp::Truncated {
-            tag: OP_LUMA,
-            missing_body_bytes: 1
-        }
-        .is_truncated());
+        assert!(
+            QoiOp::Truncated {
+                tag: OP_LUMA,
+                missing_body_bytes: 1
+            }
+            .is_truncated()
+        );
         assert!(!QoiOp::Run { length: 1 }.is_truncated());
         assert!(!QoiOp::Rgb { r: 0, g: 0, b: 0 }.is_truncated());
     }
@@ -1231,7 +1233,7 @@ mod tests {
         check_write_to_roundtrip(&[OP_LUMA | 0x20, 0x88]); // Luma (2-byte)
         check_write_to_roundtrip(&[OP_RGB, 0x0A, 0x14, 0x1E]); // Rgb (4-byte)
         check_write_to_roundtrip(&[OP_RGBA, 0x0A, 0x14, 0x1E, 0x28]); // Rgba
-                                                                      // Mixed multi-chunk stream exercising every arm in one walk.
+        // Mixed multi-chunk stream exercising every arm in one walk.
         check_write_to_roundtrip(&[
             OP_RGBA,
             1,

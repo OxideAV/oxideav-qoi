@@ -22,7 +22,7 @@
 //! Run with:
 //!     cargo bench -p oxideav-qoi --bench reuse
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_qoi::{decode, encode_qoi_into, parse_qoi_into};
 

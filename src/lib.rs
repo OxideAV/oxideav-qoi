@@ -147,7 +147,7 @@ pub use options::{DecodeOptions, EncodeOptions};
 // ---- QOI depth APIs --------------------------------------------------------
 pub use decoder::parse_qoi_into;
 pub use encoder::{encode_qoi_full_into, encode_qoi_into};
-pub use ops::{iter_ops, iter_ops_strict, qoi_hash, QoiOp, QoiOpIter};
+pub use ops::{QoiOp, QoiOpIter, iter_ops, iter_ops_strict, qoi_hash};
 
 // ---- deprecated pre-contract entry points (one release) --------------------
 #[allow(deprecated)]
@@ -484,8 +484,8 @@ mod tests {
         bytes.extend_from_slice(&65536u32.to_be_bytes()); // height
         bytes.push(4); // channels = RGBA
         bytes.push(0); // colorspace = sRGB
-                       // A single RGB chunk's worth of payload, then the end marker —
-                       // nowhere near enough to fill 4.29e9 pixels.
+        // A single RGB chunk's worth of payload, then the end marker —
+        // nowhere near enough to fill 4.29e9 pixels.
         bytes.push(OP_RGB);
         bytes.extend_from_slice(&[1, 2, 3]);
         bytes.extend_from_slice(END_MARKER);

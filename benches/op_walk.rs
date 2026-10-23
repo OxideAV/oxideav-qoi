@@ -41,7 +41,7 @@
 //! Run with:
 //!     cargo bench -p oxideav-qoi --bench op_walk
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_qoi::{iter_ops, iter_ops_strict};
 

@@ -231,7 +231,7 @@ impl CodecOptionsStruct for EncodeOptions {
                     other => {
                         return Err(oxideav_core::Error::invalid(format!(
                             "QOI encoder: invalid colorspace {other:?}"
-                        )))
+                        )));
                     }
                 });
                 Ok(())

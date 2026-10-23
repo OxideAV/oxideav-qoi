@@ -37,7 +37,7 @@
 //!    `Truncated`, and `Err` otherwise.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_qoi::{iter_ops, iter_ops_strict, QoiOp, END_MARKER, HEADER_SIZE, MAGIC};
+use oxideav_qoi::{END_MARKER, HEADER_SIZE, MAGIC, QoiOp, iter_ops, iter_ops_strict};
 
 // Keep synthesized dimensions tiny. The walker never allocates a pixel
 // buffer (it only borrows the input slice), so the cap is purely to keep

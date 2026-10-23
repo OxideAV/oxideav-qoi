@@ -651,7 +651,7 @@ impl Encoder for QoiEncoder {
             _ => {
                 return Err(oxideav_core::Error::invalid(
                     "QOI encoder: expected video frame",
-                ))
+                ));
             }
         };
         let image = QoiImage::from_video_frame(vf, &self.out_params)?;
