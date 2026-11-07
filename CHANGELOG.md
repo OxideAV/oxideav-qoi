@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/OxideAV/oxideav-qoi/compare/v0.1.7...v0.2.0) - 2026-11-07
+
+### Other
+
+- API hygiene: hide the container module
+- edition 2024, MSRV 1.95
+
 ### Changed
 
 - `#[doc(hidden)]` on the internal `container` module (registry plumbing; register through `register` / `register_containers`). No new `#[non_exhaustive]`: the contract records already carry it, and `QoiChannels`, `QoiColorspace`, `QoiHeader` and `QoiOp` stay exhaustive because the QOI specification fixes the header fields and the seven ops.
