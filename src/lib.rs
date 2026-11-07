@@ -96,6 +96,7 @@
 
 pub mod api;
 #[cfg(feature = "registry")]
+#[doc(hidden)]
 pub mod container;
 pub mod decoder;
 pub mod encoder;
